@@ -45,6 +45,19 @@ from tqdm import tqdm
 # =============================================================================
 
 
+def _pil_to_tk_photo(pil_img, tk_module):
+    """Convert PIL Image to Tkinter PhotoImage without using ImageTk.
+
+    This is a workaround for compatibility issues between Pillow's _imagingtk
+    module and certain Tcl/Tk installations (e.g., uv-managed Python on macOS).
+    """
+    import io
+
+    buffer = io.BytesIO()
+    pil_img.save(buffer, format='PPM')
+    return tk_module.PhotoImage(data=buffer.getvalue())
+
+
 def _quad(a, b, c) -> float:
     """Compute the quadratic interpolation coefficient for sub‑pixel peak estimation."""
     d = a - 2 * b + c
@@ -303,7 +316,7 @@ class TemplateGUI:
         import tkinter as tk
         from tkinter import messagebox, simpledialog, ttk
 
-        from PIL import Image, ImageTk
+        from PIL import Image
 
         # For Pillow ≥10 compatibility: fallback to older API name
         try:
@@ -453,7 +466,7 @@ class TemplateGUI:
 
     # -------- UI actions --------
     def _show(self, idx: int) -> None:
-        from PIL import Image, ImageTk
+        from PIL import Image
 
         # Fallback to older API name if necessary
         try:
@@ -489,7 +502,7 @@ class TemplateGUI:
         if self.zoom != 1.0:
             w, h = img.size
             img = img.resize((int(w * self.zoom), int(h * self.zoom)), ResamplingFilter)
-        self._photo = ImageTk.PhotoImage(img)
+        self._photo = _pil_to_tk_photo(img, self.tk)
         self.canvas.config(width=img.width, height=img.height)
         self.canvas.create_image(0, 0, anchor='nw', image=self._photo)
 
