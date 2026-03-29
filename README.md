@@ -28,8 +28,10 @@ templatematching_affine_stabilizer/
 │   ├── Affined.mp4              # ブレ補正済み動画
 │   └── Matched.csv              # マッチング結果
 ├── README.md                    # 本ドキュメント
-├── requirement.txt              # 依存パッケージ
-├── venv/                        # Python仮想環境
+├── pyproject.toml               # プロジェクト設定・依存パッケージ
+├── uv.lock                      # 依存関係のロックファイル
+├── .python-version              # Python バージョン指定
+├── .venv/                       # Python仮想環境（uv が自動作成）
 └── prompt_chatgpto3.yml         # ChatGPT o3用プロンプト
 ```
 
@@ -37,23 +39,23 @@ templatematching_affine_stabilizer/
 
 ## インストール
 
-### 1. リポジトリをクローン
+### 1. uv をインストール（未インストールの場合）
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+### 2. リポジトリをクローン
 ```bash
 git clone <repository-url>
 cd templatematching_affine_stabilizer
 ```
 
-### 2. Python 仮想環境を作成・有効化
-```bash
-python3.11 -m venv venv
-source venv/bin/activate  # macOS/Linux
-# venv\Scripts\activate   # Windows
-```
-
 ### 3. 依存パッケージをインストール
 ```bash
-pip install -r requirement.txt
+uv sync
 ```
+
+> **Note**: Python バージョン（3.13）は `.python-version` で管理されており、`uv` が自動的に適切なバージョンを使用します。
 
 ---
 
@@ -62,13 +64,12 @@ pip install -r requirement.txt
 ### GUI モード（デフォルト）
 
 ```bash
-cd 02_code
-python affine_template_matching.py
+uv run python 02_code/affine_template_matching.py
 ```
 
 または動画ファイルを明示的に指定:
 ```bash
-python affine_template_matching.py --video ../01_input/input.mp4
+uv run python 02_code/affine_template_matching.py --video 01_input/input.mp4
 ```
 
 **GUI 操作方法**:
@@ -83,7 +84,7 @@ python affine_template_matching.py --video ../01_input/input.mp4
 ### CLI モード（バッチ処理）
 
 ```bash
-python affine_template_matching.py --nogui
+uv run python 02_code/affine_template_matching.py --nogui
 ```
 
 既存の `Input.csv` を使用してバッチ処理を実行します。
@@ -185,7 +186,7 @@ pillow==11.2.1
 tqdm==4.67.1
 ```
 
-**Python バージョン**: 3.11
+**Python バージョン**: 3.13（`.python-version` で管理）
 
 ---
 
