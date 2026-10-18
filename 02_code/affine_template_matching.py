@@ -861,7 +861,10 @@ class TemplateGUI:
             img = img.resize((int(w * self.zoom), int(h * self.zoom)), ResamplingFilter)
         self._photo = _pil_to_tk_photo(img, self.tk)
         self.canvas.config(width=img.width, height=img.height)
-        self.canvas.create_image(0, 0, anchor='nw', image=self._photo)
+        if getattr(self, '_canvas_image', None) is None:
+            self._canvas_image = self.canvas.create_image(0, 0, anchor='nw', image=self._photo)
+        else:
+            self.canvas.itemconfigure(self._canvas_image, image=self._photo)
 
     def _seek(self, val: float) -> None:
         self._show(int(float(val)))
@@ -969,30 +972,29 @@ class TemplateGUI:
         self._poll(q)
 
     def _poll(self, q: queue.Queue[Tuple[str, Any]]) -> None:
-        try:
-            typ, *rest = q.get_nowait()
+        for _ in range(1000):
+            try:
+                typ, payload = q.get_nowait()
+            except queue.Empty:
+                break
             if typ == 'setmax':
-                self.pb['maximum'] = rest[0]
+                self.pb['maximum'] = payload
                 self.pb['value'] = 0
             elif typ == 'prog':
-                self.pb['value'] = rest[0]
-            elif typ == 'done':
-                self.btn_delete.config(state='normal')
-                self.btn_undo.config(state='normal')
-                self.btn_execute.config(state='normal')
-                self.messagebox.showinfo('完了', '補正完了')
-                self.root.destroy()
+                self.pb['value'] = payload
+            elif typ in ('done', 'err'):
+                self._finish(typ, payload)
                 return
-            elif typ == 'err':
-                self.btn_delete.config(state='normal')
-                self.btn_undo.config(state='normal')
-                self.btn_execute.config(state='normal')
-                self.messagebox.showerror('Error', str(rest[0]))
-                self.root.destroy()
-                return
-        except queue.Empty:
-            pass
-        self.root.after(100, self._poll, q)
+        self.root.after(0 if not q.empty() else 100, self._poll, q)
+
+    def _finish(self, typ: str, payload: Any) -> None:
+        for button in (self.btn_delete, self.btn_undo, self.btn_execute):
+            button.config(state='normal')
+        if typ == 'done':
+            self.messagebox.showinfo('完了', f'補正完了: {self.outdir}')
+        else:
+            self.messagebox.showerror('Error', str(payload))
+        self.root.destroy()
 
 
 # =============================================================================
