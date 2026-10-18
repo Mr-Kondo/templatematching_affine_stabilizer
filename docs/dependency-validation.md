@@ -20,7 +20,7 @@ OpenCV wheelのmacOS最低要件はARMで13、Intelで14です。古いmacOSで�
 
 ## 確認内容
 
-- このMac（ARM、Python 3.13.5）の新規環境で `uv sync --locked`、24単体テスト、両CLI入口を確認。
+- macOS ARM・Python 3.13.5の新規環境で `uv sync --locked`、24単体テスト、両CLI入口を確認。
 - 実動画306フレームで入出力数・追跡誤差の方式間差・品質診断・背景点の残留ずれを比較。
   生データは [issue14-dependencies.json](../benchmarks/results/issue14-dependencies.json)。
 - Tk/Pillowは実TkでCSV読込、PPM PhotoImage、反復描画を確認。
