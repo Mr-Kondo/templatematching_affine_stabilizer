@@ -1,0 +1,47 @@
+{
+  "baseline": "ba92055",
+  "current_source_sha256": "80e105aa60afa53ab91e2641d6dbff61b5832334d3121e4ff2734a9b946c9f94",
+  "platform": "darwin",
+  "python": "3.13.5 (main, Jun 12 2025, 12:22:43) [Clang 20.1.4 ]",
+  "opencv": "4.11.0",
+  "cases": [
+    {
+      "frames": 301,
+      "templates": 3,
+      "baseline": {
+        "match_s": 0.08730016701156273,
+        "estimate_s": 0.20270337499096058,
+        "match_python_peak_bytes": 1911867,
+        "estimate_python_peak_bytes": 1212663,
+        "max_rss_bytes": 106266624
+      },
+      "current": {
+        "match_s": 0.06178537500090897,
+        "estimate_s": 0.25913195800967515,
+        "match_python_peak_bytes": 995225,
+        "estimate_python_peak_bytes": 1338053,
+        "max_rss_bytes": 105431040
+      },
+      "csv_values_identical": true
+    },
+    {
+      "frames": 3001,
+      "templates": 3,
+      "baseline": {
+        "match_s": 0.7021142919838894,
+        "estimate_s": 2.0134584170009475,
+        "match_python_peak_bytes": 11843652,
+        "estimate_python_peak_bytes": 9667732,
+        "max_rss_bytes": 135725056
+      },
+      "current": {
+        "match_s": 0.5086903340124991,
+        "estimate_s": 1.7849817919777706,
+        "match_python_peak_bytes": 996290,
+        "estimate_python_peak_bytes": 10568253,
+        "max_rss_bytes": 123338752
+      },
+      "csv_values_identical": true
+    }
+  ]
+}

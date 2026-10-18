@@ -29,7 +29,6 @@ from __future__ import annotations
 import argparse
 import csv
 from contextlib import contextmanager
-import gc
 import math
 import os
 import queue
@@ -374,64 +373,58 @@ class TemplateMatcher:
             ('setmax', total_frames-1) once at the start and ('prog', frame)
             after each processed frame.
         """
+        out_path = Path(out_csv)
+        self.match_count = self.low_conf_count = 0
+        self._previous_pos = {t['id']: (float(t['cx']), float(t['cy'])) for t in self.templates}
         try:
-            rec: List[List[float]] = []
-            diag: List[Dict[str, Any]] = []
-            previous_pos: Dict[int, Tuple[float, float]] = {
-                t['id']: (float(t['cx']), float(t['cy'])) for t in self.templates}
-            idx = 1
-            total = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)) - 1
-            # Initialise progress counter; always define prog to avoid UnboundLocalError
-            prog = 0
-            if q:
-                q.put(('setmax', total))
-            with tqdm(total=total, desc='match') as bar:
-                while True:
-                    ok, f = self.cap.read()
-                    if not ok:
-                        break
-                    idx += 1
-                    g = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
-                    for t in self.templates:
-                        mx, my, d = self._match(g, t)
-                        rec.append([idx, t['id'], t['cx'], t['cy'], mx, my])
-                        # Inter-frame position jump of the same template: catches
-                        # gross mismatches that per-frame scores cannot see
-                        # (e.g. objects moving across the template ROI).
-                        dxp = math.hypot(mx - previous_pos[t['id']][0],
-                                         my - previous_pos[t['id']][1])
-                        d['delta_px'] = round(float(dxp), 4)
-                        d['low_conf'] = bool(d['low_conf'] or d['delta_px'] > MATCH_DELTA_MAX)
-                        previous_pos[t['id']] = (mx, my)
-                        diag.append([idx, t['id'], d['score'], d['clearness'],
-                                     d['ccoeff_peak'], d['roi_edge'], d['delta_px'],
-                                     d['re_searched'], d['expanded_adopted'], d['low_conf']])
-                    bar.update(1)
-                    if q:
-                        prog += 1
-                        q.put(('prog', prog))
-            # Total number of frames actually read (useful metadata for callers;
-            # the reference frame 1 is included even though it is not matched).
-            self.frame_count = idx
-            self.match_stats = diag
-            # Ensure output directory exists
-            out_path = Path(out_csv)
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            if total >= 0 and idx != total + 1:
-                raise RuntimeError(f'動画の途中読込に失敗: {idx}/{total + 1}フレーム')
-            with output_files([out_path, out_path.with_name(out_path.stem + '_diagnostics.csv')]) as staged:
-                pd.DataFrame(rec, columns=['Frame_No', 'Template_No', 'x', 'y', 'mx',
-                                           'my']).to_csv(staged[0], index=False)
-                # Confidence diagnostics (separate file: the Matched.csv format is
-                # unchanged for existing consumers).
-                pd.DataFrame(diag, columns=['Frame_No', 'Template_No', 'score', 'clearness',
-                                            'ccoeff_peak', 'roi_edge', 'delta_px', 're_searched',
-                                            'expanded_adopted', 'low_conf']).to_csv(
-                    staged[1], index=False)
+            paths = [out_path, out_path.with_name(out_path.stem + '_diagnostics.csv')]
+            with output_files(paths) as staged, \
+                 open(staged[0], 'w', newline='', encoding='utf-8') as matches, \
+                 open(staged[1], 'w', newline='', encoding='utf-8') as diagnostics:
+                writer, diag_writer = csv.writer(matches), csv.writer(diagnostics)
+                writer.writerow(['Frame_No', 'Template_No', 'x', 'y', 'mx', 'my'])
+                diag_writer.writerow(['Frame_No', 'Template_No', 'score', 'clearness', 'ccoeff_peak',
+                                      'roi_edge', 'delta_px', 're_searched', 'expanded_adopted', 'low_conf'])
+                self._track(writer, diag_writer, q)
             del self.first
-            gc.collect()
         finally:
             self.cap.release()
+
+    def _track(self, writer, diag_writer, q) -> None:
+        total = max(0, int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)))
+        self.frame_count = 1
+        if q is not None:
+            q.put(('setmax', max(0, total - 1)))
+        with tqdm(total=max(0, total - 1), desc='match') as bar:
+            while True:
+                ok, frame = self.cap.read()
+                if not ok:
+                    break
+                self.frame_count += 1
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                for row, diagnostic in self._frame_matches(gray):
+                    writer.writerow(row)
+                    diag_writer.writerow(diagnostic)
+                bar.update(1)
+                if q is not None:
+                    q.put(('prog', self.frame_count - 1))
+        if total > 0 and self.frame_count != total:
+            raise RuntimeError(f'動画の途中読込に失敗: {self.frame_count}/{total}フレーム')
+
+    def _frame_matches(self, gray):
+        for template in self.templates:
+            mx, my, diagnostic = self._match(gray, template)
+            previous = self._previous_pos[template['id']]
+            delta = math.hypot(mx - previous[0], my - previous[1])
+            low_conf = bool(diagnostic['low_conf'] or delta > MATCH_DELTA_MAX)
+            self._previous_pos[template['id']] = (mx, my)
+            self.match_count += 1
+            self.low_conf_count += low_conf
+            row = [self.frame_count, template['id'], template['cx'], template['cy'], mx, my]
+            diagnostic_row = [self.frame_count, template['id'], diagnostic['score'],
+                              diagnostic['clearness'], diagnostic['ccoeff_peak'], diagnostic['roi_edge'],
+                              round(delta, 4), diagnostic['re_searched'], diagnostic['expanded_adopted'], low_conf]
+            yield row, diagnostic_row
 
 
 # =============================================================================
@@ -473,6 +466,16 @@ class AffineCorrector:
                  csv: str,
                  outv: str = '03_output/Affined.mp4'):
         self.matches = pd.read_csv(csv)
+        required = ['Frame_No', 'x', 'y', 'mx', 'my']
+        if not set(required).issubset(self.matches.columns):
+            raise ValueError('追跡CSV: Frame_No, x, y, mx, my列が必要です')
+        coordinates = self.matches[required].to_numpy(dtype=float)
+        if not np.isfinite(coordinates).all():
+            raise ValueError('追跡CSV: 座標・フレーム番号には有限の数値が必要です')
+        frames = coordinates[:, 0]
+        if np.any(frames < 2) or np.any(frames != np.floor(frames)):
+            raise ValueError('追跡CSV: フレーム番号には2以上の整数が必要です')
+        self._frames = self.matches.groupby('Frame_No', sort=False).indices
         self.video = Path(video)
         self.out = Path(outv)
         # Diagnostics recorded for each affine-estimation call (frame, point count,
@@ -493,7 +496,7 @@ class AffineCorrector:
         Also writes the estimation-quality diagnostics next to the output
         video (``<output>_diagnostics.csv``).
         """
-        for n in sorted(self.matches.Frame_No.unique()):
+        for n in sorted(self._frames):
             self._M(int(n))
         self.write_diagnostics()
 
@@ -543,7 +546,9 @@ class AffineCorrector:
         cached = self._mcache.get(n)
         if cached is not None:
             return cached
-        df = self.matches[self.matches.Frame_No == n]
+        if n not in self._frames:
+            raise ValueError(f'追跡CSV: フレーム{n}の対応点がありません')
+        df = self.matches.iloc[self._frames[n]]
         src = df[['mx', 'my']].to_numpy(np.float32)
         dst = df[['x', 'y']].to_numpy(np.float32)
         M, inliers = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=2)
@@ -1049,12 +1054,12 @@ def main() -> None:
         n_est = len(estim)
         n_fail = sum(1 for s in estim if not s.get('ok'))
         q_fail = [s['frame'] for s in estim if s.get('quality_ok') is False]
-        low = sum(1 for d in matcher.match_stats if d[-1])
+        low = matcher.low_conf_count
         print(f'[report] frames: {n_est}  est success: {n_est - n_fail}  '
               f'est failure: {n_fail}')
         print(f'[report] quality: pass {n_est - len(q_fail)}  fail {len(q_fail)}'
               + (f'  (frames {q_fail[:20]})' if q_fail else ''))
-        print(f'[report] low-confidence matches: {low} / {len(matcher.match_stats)} '
+        print(f'[report] low-confidence matches: {low} / {matcher.match_count} '
               f'(details: {a.outdir}/Matched_diagnostics.csv, '
               f'{a.outdir}/Affined_diagnostics.csv)')
     else:
