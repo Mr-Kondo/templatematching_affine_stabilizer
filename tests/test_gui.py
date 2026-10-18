@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / '02_code'))
-import affine_template_matching as atm
+import stabilizer_gui as atm
 
 
 class GUITests(unittest.TestCase):
