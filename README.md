@@ -84,7 +84,7 @@ uv run python 02_code/affine_template_matching.py --video 01_input/input.mp4
 ### CLI モード（バッチ処理）
 
 ```bash
-uv run python 02_code/affine_template_matching.py --nogui
+uv run python 02_code/affine_template_matching.py --nogui --outdir 03_output/new_run
 ```
 
 既存の `Input.csv` を使用してバッチ処理を実行します。
@@ -94,6 +94,7 @@ uv run python 02_code/affine_template_matching.py --nogui
 |-----------|------|-----------|
 | `--video` | 入力動画ファイルのパス | `01_input/` 内の最初のMP4を自動検出 |
 | `--csv` | テンプレート定義CSVのパス | `01_input/Input.csv` |
+| `--outdir` | CLI出力先。既存ファイルの上書きを拒否 | `03_output/` |
 | `--nogui` | GUIを使わずバッチ処理 | (無効) |
 
 ---
@@ -135,6 +136,12 @@ No.,x座標,y座標,テンプレートの大きさ（正方形）,探索左,探�
 ---
 
 ## 出力ファイル
+
+GUIは `03_output/run_日時/`、CLIは `--outdir` のフォルダへ出力します。
+既存成果物は上書きしません。処理中は専用一時フォルダを使い、4つの出力が完成してから公開します。
+動画は書込後に再読込してフレーム数を確認します。通常の例外時は途中ファイルを削除し、既存ファイルを保持します。
+強制終了・電源断では一時フォルダや一部の公開済みファイルが残る可能性があります。
+
 
 ### Matched.csv
 各フレームでのテンプレートマッチング結果:
