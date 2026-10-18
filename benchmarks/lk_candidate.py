@@ -62,7 +62,7 @@ def lk_track(frames, templates):
         lk_rejected_points=rejected,lk_point_shortage_frames=shortages)
 
 
-def video_trial(method):
+def video_trial(method,tracker,refiner=None):
     started=time.perf_counter()
     with core.open_video('01_input/input.mp4') as cap:
         frames=[]
@@ -73,7 +73,7 @@ def video_trial(method):
     definitions=core.load_templates('01_input/Input.csv',frames[0].shape)
     templates=[dict(id=t['id'],cx=t['cx'],cy=t['cy'],th=t['tpl']//2,l=t['l'],r=t['r'],t=t['t'],b=t['b'],
                     patch=core.crop(frames[0],t['cx'],t['cy'],t['tpl']//2)) for t in definitions]
-    positions,counters=track(frames,templates,'baseline') if method=='baseline' else lk_track(frames,templates)
+    positions,counters=tracker(frames,templates)
     with tempfile.TemporaryDirectory(prefix='affine-lk-trial-') as temporary:
         folder=Path(temporary)
         with open(folder/'Matched.csv','w',newline='',encoding='utf-8') as stream:
@@ -81,7 +81,10 @@ def video_trial(method):
             for n,points in enumerate(positions,2):
                 for t,point in zip(templates,points):writer.writerow([n,t['id'],t['cx'],t['cy'],*point])
         corrector=core.AffineCorrector('01_input/input.mp4',str(folder/'Matched.csv'),str(folder/'out.mp4'))
-        corrector.precompute();corrector.correct()
+        corrector.precompute()
+        if refiner is not None:
+            counters.update(refiner(frames,corrector))
+        corrector.correct()
         total=time.perf_counter()-started
         from run_benchmark import eval_video, bg_residuals_lk
         background=bg_residuals_lk(Path('01_input/input.mp4'),definitions,corrector.estimate_stats)
@@ -99,7 +102,7 @@ def run(output):
                 positions,counters=track(frames,templates,'baseline') if method=='baseline' else lk_track(frames,templates)
                 report['results'].append(dict(scenario=scenario,frames=count,seed=seed,method=method,
                     **evaluate(positions,templates,motion,counters)))
-    a,pa=video_trial('baseline');b,pb=video_trial('lk')
+    a,pa=video_trial('baseline',lambda f,t:track(f,t,'baseline'));b,pb=video_trial('lk',lk_track)
     delta=np.linalg.norm(pa-pb,axis=2)
     report['real_video']=[a,b]
     report['real_coordinate_difference']={'mean_px':float(delta.mean()),'max_px':float(delta.max())}

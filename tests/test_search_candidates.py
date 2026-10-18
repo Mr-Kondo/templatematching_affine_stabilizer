@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -27,6 +28,24 @@ class CandidateChecks(unittest.TestCase):
         self.assertEqual(counters['lk_rejected_points'],10)
         self.assertEqual(len(counters['fallback_indices']),10)
         self.assertTrue(np.isfinite(positions).all())
+
+    def test_phase_and_ecc_map_in_the_documented_direction(self):
+        from registration_candidates import phase_shift, refine_ecc
+        from synth import build_base_scene
+        base=cv2.cvtColor(build_base_scene(640,360,42),cv2.COLOR_BGR2GRAY)
+        current=cv2.warpAffine(base,np.float32([[1,0,4],[0,1,6]]),(640,360))
+        displacement,response=phase_shift(base,current)
+        np.testing.assert_allclose(displacement,[4,6],atol=.3)
+        self.assertGreater(response,.2)
+        initial=np.float32([[1,0,-3.8],[0,1,-6.2]])
+        mask=np.full(base.shape,255,np.uint8)
+        refined,ok=refine_ecc(base,current,initial,mask)
+        self.assertTrue(ok)
+        np.testing.assert_allclose(refined,[[1,0,-4],[0,1,-6]],atol=.12)
+        with patch.object(cv2,'findTransformECC',side_effect=cv2.error('nonconvergence')):
+            retained,ok=refine_ecc(base,current,initial,mask)
+        self.assertFalse(ok)
+        np.testing.assert_array_equal(retained,initial)
 
     def test_truth_positions_give_zero_tracking_and_background_error(self):
         frames, templates, motion = search.scene('normal', 42, count=5)
