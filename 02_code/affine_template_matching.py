@@ -228,6 +228,10 @@ class AffineCorrector:
     (``VideoCapture -> matrix estimation -> warp -> VideoWriter``); no
     intermediate images are written to disk, so memory and disk usage stay
     constant regardless of the number of frames.
+
+    The per-frame affine matrix and the fixed perspective transform are
+    composed into a single 3x3 homography, so each frame is resampled only
+    once (no double interpolation between the two warps).
     """
 
     def __init__(self,
@@ -320,14 +324,17 @@ class AffineCorrector:
                 if not ok:
                     break
                 n = 2 + done
-                # Apply the affine transformation
-                aff = cv2.warpAffine(f,
-                                     self._M(n), (w, h),
-                                     flags=cv2.INTER_LINEAR,
-                                     borderMode=cv2.BORDER_CONSTANT)
-                # Apply an optional perspective warp (sample implementation)
-                persp = cv2.warpPerspective(aff, M_persp, (w, h))
-                out.write(persp)
+                # Compose the fixed perspective transform with the per-frame
+                # affine matrix (both map source -> destination coordinates)
+                # so the frame is resampled exactly once.
+                a = self._M(n)
+                h_mat = M_persp @ np.vstack([a, [0.0, 0.0, 1.0]])
+                warp = cv2.warpPerspective(f,
+                                           h_mat,
+                                           (w, h),
+                                           flags=cv2.INTER_LINEAR,
+                                           borderMode=cv2.BORDER_CONSTANT)
+                out.write(warp)
                 bar.update(1)
                 done += 1
                 if q:
