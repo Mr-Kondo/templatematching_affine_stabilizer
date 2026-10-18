@@ -1,0 +1,148 @@
+{
+  "synth": {
+    "packages": {
+      "numpy": "2.5.4",
+      "opencv": "4.14.0",
+      "pandas": "3.0.6",
+      "pillow": "13.0.0",
+      "tqdm": "4.70.1"
+    },
+    "frames": {
+      "input": 61,
+      "stabilised_written": 61,
+      "frame_count_match": true,
+      "input_fps": 30.0,
+      "output_fps": 30.0,
+      "input_duration_s": 2.033333333333333,
+      "output_duration_s": 2.033333333333333
+    },
+    "quality": {
+      "thresholds": {
+        "match_score_min": 0.95,
+        "match_clear_min": 0.0002,
+        "match_ccoeff_alarm": 0.78,
+        "match_delta_max_px": 8.0,
+        "est_inlier_count_min": 3,
+        "est_inlier_ratio_min": 0.6,
+        "est_residual_max_px": 2.0,
+        "est_spread_min_px": 10.0,
+        "est_delta_t_max_px": 12.0,
+        "est_delta_scale_max": 0.02,
+        "est_delta_rot_max_deg": 1.0
+      },
+      "matching": {
+        "rows": 360,
+        "low_conf": 38,
+        "re_searched": 34,
+        "expanded_adopted": 1,
+        "roi_edge": 23
+      },
+      "estimation": {
+        "frames": 60,
+        "est_fail": 0,
+        "quality_fail": 35,
+        "quality_fail_frames": [
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          54,
+          55,
+          56,
+          57,
+          58,
+          59,
+          60,
+          61
+        ]
+      }
+    },
+    "timings_s": {
+      "match": 0.2466545000206679,
+      "estimate_matrices": 0.014554499997757375,
+      "warp_and_write_streamed": 0.16002599999774247,
+      "pipeline_total": 0.42123500001616776,
+      "prepare_synthetic": 0.1188812920008786
+    }
+  },
+  "video": {
+    "packages": {
+      "numpy": "2.5.4",
+      "opencv": "4.14.0",
+      "pandas": "3.0.6",
+      "pillow": "13.0.0",
+      "tqdm": "4.70.1"
+    },
+    "frames": {
+      "input": 306,
+      "stabilised_written": 306,
+      "frame_count_match": true,
+      "input_fps": 30.09835966890624,
+      "output_fps": 30.098,
+      "input_duration_s": 10.166667,
+      "output_duration_s": 10.16678849092963
+    },
+    "quality": {
+      "thresholds": {
+        "match_score_min": 0.95,
+        "match_clear_min": 0.0002,
+        "match_ccoeff_alarm": 0.78,
+        "match_delta_max_px": 8.0,
+        "est_inlier_count_min": 3,
+        "est_inlier_ratio_min": 0.6,
+        "est_residual_max_px": 2.0,
+        "est_spread_min_px": 10.0,
+        "est_delta_t_max_px": 12.0,
+        "est_delta_scale_max": 0.02,
+        "est_delta_rot_max_deg": 1.0
+      },
+      "matching": {
+        "rows": 1525,
+        "low_conf": 0,
+        "re_searched": 0,
+        "expanded_adopted": 0,
+        "roi_edge": 0
+      },
+      "estimation": {
+        "frames": 305,
+        "est_fail": 0,
+        "quality_fail": 0,
+        "quality_fail_frames": []
+      }
+    },
+    "timings_s": {
+      "match": 1.0566604170016944,
+      "estimate_matrices": 0.0646307919814717,
+      "warp_and_write_streamed": 1.3311757920018863,
+      "pipeline_total": 2.4524670009850524,
+      "prepare_synthetic": 0.0
+    }
+  },
+  "production_commit": "c9d4983",
+  "unit_tests": 29,
+  "gui": "macOS ARM real Tk: CSV save, worker, four artifacts, completion, capture released",
+  "existing_tracked_outputs_unchanged": true
+}
