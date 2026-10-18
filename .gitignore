@@ -8,3 +8,5 @@ __pycache__/
 
 # Benchmark run artifacts (timestamped run dirs are local-only)
 03_output/benchmark/
+# macOS metadata
+.DS_Store

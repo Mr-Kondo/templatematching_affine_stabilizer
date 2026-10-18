@@ -1,8 +1,10 @@
 [project]
 name = "templatematching-affine-stabilizer"
-version = "0.6.0"
+version = "0.6.1"
 description = "Add your description here"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
     "numpy==2.3.0",
