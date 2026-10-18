@@ -28,7 +28,7 @@ def _pil_to_tk_photo(pil_img, tk_module):
 class TemplateGUI:
     """Interactive GUI for selecting templates and running the stabilisation pipeline."""
 
-    # clean-code exception: session lifetime must release capture after Tk exits; revisit when adding cancellation.
+    # clean-code exception (function size): session lifetime must release capture after Tk exits; revisit when adding cancellation.
     def __init__(self, video: str, csv_p: str = '01_input/Input.csv'):
         import tkinter as tk
         from tkinter import messagebox, simpledialog, ttk
@@ -59,7 +59,7 @@ class TemplateGUI:
         finally:
             self.cap.release()
 
-    # clean-code exception: explicit Tk layout keeps binding order visible; split when a new panel is added.
+    # clean-code exception (function size): explicit Tk layout keeps binding order visible; split when a new panel is added.
     def _build_widgets(self) -> None:
         ttk = self.ttk
         ctl = ttk.Frame(self.root)
@@ -144,7 +144,7 @@ class TemplateGUI:
             self._add_tpl(t['cx'], t['cy'], t['tpl'], t['l'], t['r'], t['t'], t['b'],
                           existing=True, id=t['id'])
 
-    # clean-code exception: legacy GUI argument order is retained; replace with a row object if fields change.
+    # clean-code exception (four-argument ceiling): legacy GUI argument order is retained; replace with a row object if fields change.
     def _add_tpl(
         self,
         cx: int,
@@ -168,7 +168,7 @@ class TemplateGUI:
                          iid=d['id'],
                          values=(d['id'], cx, cy, tpl, left, right, top, bottom))
 
-    # clean-code exception: one render transaction owns the image reference; split when another view is introduced.
+    # clean-code exception (function size): one render transaction owns the image reference; split when another view is introduced.
     def _show(self, idx: int) -> None:
         from PIL import Image
 
@@ -242,7 +242,7 @@ class TemplateGUI:
                                  t['b']))
         self._show(int(self.scale.get()))
 
-    # clean-code exception: one edit transaction keeps cancellation atomic; split when the editor becomes non-modal.
+    # clean-code exception (function size): one edit transaction keeps cancellation atomic; split when the editor becomes non-modal.
     def _edit(self, evt) -> None:
         iid = self.tree.focus()
         if not iid:

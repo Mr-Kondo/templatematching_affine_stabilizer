@@ -110,7 +110,7 @@ def crop(src: np.ndarray, cx: int, cy: int, h: int) -> np.ndarray:
     return crop_lrbt(src, cx, cy, h, h, h, h)
 
 
-# clean-code exception: positional crop API is used by legacy callers; revisit if its coordinate contract changes.
+# clean-code exception (four-argument ceiling): positional crop API is used by legacy callers; revisit if its coordinate contract changes.
 def crop_lrbt(src: np.ndarray, cx: int, cy: int, left: int, right: int, top: int,
               bottom: int) -> np.ndarray:
     """Crop a rectangular ROI using individual pixel margins measured from the centre.
@@ -250,7 +250,7 @@ class TemplateMatcher:
                      patch=crop(self.first, t['cx'], t['cy'], t['tpl'] // 2))
                 for t in templates]
 
-    # clean-code exception: candidate comparison keeps confidence rules together; split when another search mode is adopted.
+    # clean-code exception (function size): candidate comparison keeps confidence rules together; split when another search mode is adopted.
     def _match(self, g: np.ndarray, t: Dict[str, Any]) -> Tuple[float, float, Dict[str, Any]]:
         """Match a single template t in the current grayscale frame g.
 
@@ -293,7 +293,7 @@ class TemplateMatcher:
                             expanded_adopted=bool(expanded),
                             low_conf=bool(trigger or ccoeff_peak < MATCH_CCOEFF_ALARM))
 
-    # clean-code exception: explicit directional margins preserve existing callers; revisit when search geometry changes.
+    # clean-code exception (four-argument ceiling): explicit directional margins preserve existing callers; revisit when search geometry changes.
     def _match_window(self, g: np.ndarray, t: Dict[str, Any], l: int, r: int, w: int,
                       b: int) -> Tuple[float, float, float, float, bool, float]:
         """Match template t within one specific search window (l, r, w, b margins).
@@ -608,7 +608,7 @@ class AffineCorrector:
                 writer.release()
             verify_video(staged[0], done)
 
-    # clean-code exception: sequential decode/warp/progress is one loop; split when adding another output sink.
+    # clean-code exception (function size): sequential decode/warp/progress is one loop; split when adding another output sink.
     def _warp_frames(self, cap, writer, q) -> int:
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
