@@ -47,7 +47,7 @@ def scene(name, seed, count=61):
             cv2.rectangle(frame, (int(x)-24,int(y)-24), (int(x)+24,int(y)+24), 180, -1)
         if name == 'illumination':
             frame = np.clip(frame.astype(float)*(1+.25*np.sin(n/15))+12*np.sin(n/10),0,255).astype(np.uint8)
-        if name == 'foreground':
+        if name == 'foreground' and n > 0:
             x = (n*9) % (width-120)
             cv2.rectangle(frame,(x,100),(x+120,260),220,-1)
         frames.append(frame)
