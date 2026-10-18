@@ -231,7 +231,9 @@ class AffineCorrector:
 
     The per-frame affine matrix and the fixed perspective transform are
     composed into a single 3x3 homography, so each frame is resampled only
-    once (no double interpolation between the two warps).
+    once (no double interpolation between the two warps).  The output keeps
+    every input frame, including frame 1 (identity affine), so the frame
+    count matches the input 1:1.
     """
 
     def __init__(self,
@@ -282,9 +284,17 @@ class AffineCorrector:
     def correct(self, q: queue.Queue | None = None) -> None:
         """Stream the input video once, warping each frame with its estimated transform.
 
-        The reference frame (frame 1, from which templates were extracted) is
-        not emitted, matching the behaviour of the original PNG-based
-        pipeline: the output contains frames 2..K.
+        The output contains every input frame (1..K), so the frame count and
+        the frame correspondence are 1:1 with the input:
+
+        - frame 1 (the reference frame from which templates were extracted)
+          is emitted with the identity affine composed with the fixed
+          perspective transform,
+        - frames 2..K are emitted with their estimated affine matrix composed
+          with the fixed perspective transform.
+
+        The tracking CSV covers frames 2..K (frame 1 is the template
+        reference and needs no matching); existing CSVs remain compatible.
 
         Parameters
         ----------
@@ -297,11 +307,11 @@ class AffineCorrector:
             raise RuntimeError('cannot open video')
         fps = cap.get(cv2.CAP_PROP_FPS)
         w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        ok, _first = cap.read()
+        ok, first = cap.read()
         if not ok:
             cap.release()
             raise RuntimeError('cannot read video')
-        total = max(0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) - 1)
+        total = max(0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
         if q:
             q.put(('setmax', total))
         fourcc_fn = cv2.VideoWriter_fourcc if hasattr(
@@ -319,11 +329,23 @@ class AffineCorrector:
         M_persp = cv2.getPerspectiveTransform(src_pts, dst_pts)
         done = 0
         with tqdm(total=total, desc='warp') as bar:
+            # Frame 1: reference frame. Emit it with the identity affine
+            # (composed with the fixed perspective) so the output frame
+            # count matches the input and correspondence stays 1:1.
+            out.write(cv2.warpPerspective(first,
+                                          M_persp,
+                                          (w, h),
+                                          flags=cv2.INTER_LINEAR,
+                                          borderMode=cv2.BORDER_CONSTANT))
+            bar.update(1)
+            done = 1
+            if q:
+                q.put(('prog', done))
             while True:
                 ok, f = cap.read()
                 if not ok:
                     break
-                n = 2 + done
+                n = 1 + done
                 # Compose the fixed perspective transform with the per-frame
                 # affine matrix (both map source -> destination coordinates)
                 # so the frame is resampled exactly once.
