@@ -19,6 +19,15 @@ class CandidateChecks(unittest.TestCase):
             position = method(translated, template, (67,69))[:2]
             np.testing.assert_allclose(position, [67,69], atol=.15)
 
+    def test_lk_detects_textureless_point_shortage(self):
+        from lk_candidate import lk_track
+        frames, templates, motion = search.scene('low_texture',42,count=3)
+        positions,counters=lk_track(frames,templates)
+        self.assertEqual(counters['lk_point_shortage_frames'],2)
+        self.assertEqual(counters['lk_rejected_points'],10)
+        self.assertEqual(len(counters['fallback_indices']),10)
+        self.assertTrue(np.isfinite(positions).all())
+
     def test_truth_positions_give_zero_tracking_and_background_error(self):
         frames, templates, motion = search.scene('normal', 42, count=5)
         centres = np.array([[t['cx'],t['cy']] for t in templates],float)
