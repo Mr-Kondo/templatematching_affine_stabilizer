@@ -52,6 +52,7 @@ GUIは `03_output/run_日時/`、CLIは `--outdir` に、補正動画・追跡CS
 
 - [操作と入出力](docs/usage.md): GUI、CLI、CSV形式、入力条件、診断、エラーへの対処。
 - [補正処理と限界](docs/algorithm.md): 照合・補間・推定・変換の順序と判断条件。
+- [手法の数学的根拠](docs/mathematical-foundations.md): 相関・補間・推定・変換の式、成立条件、出典とコード対応。
 - [開発と検証](docs/development.md): コード構成、依存管理、テスト、性能評価、候補手法の採否。
 
 推定に必要な最低点数は異なる中心2点です。品質判定では内点3点以上などを使います。
