@@ -248,13 +248,9 @@ GUI・CLIはともに `run_pipeline` を使用します。`app.py` からも同�
 
 ## 依存パッケージ
 
-```
-numpy==2.3.0
-opencv-python-headless==4.11.0.86
-pandas==2.3.0
-pillow==11.2.1
-tqdm==4.67.1
-```
+直接依存はNumPy、OpenCV headless、pandas、Pillow、tqdmです。
+正確なバージョンは [pyproject.toml](pyproject.toml)、間接依存を含む固定値は [uv.lock](uv.lock) を参照してください。
+対応・検証状況は [依存関係の検証](docs/dependency-validation.md) に記載します。
 
 **Python バージョン**: 3.13（`.python-version` で管理）
 

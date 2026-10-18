@@ -1,4 +1,5 @@
 import csv
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -20,7 +21,7 @@ class ValidationTests(unittest.TestCase):
                      dict(id=2, cx=40, cy=40, tpl=8, l=8, r=8, t=8, b=8)]
 
     def write_csv(self, path, rows=None):
-        with open(path, 'w', newline='') as stream:
+        with open(path, 'w', newline='', encoding='utf-8') as stream:
             writer = csv.writer(stream)
             writer.writerow(atm.TEMPLATE_FIELDS)
             for row in rows if rows is not None else self.rows:
@@ -73,7 +74,7 @@ class ValidationTests(unittest.TestCase):
                          ','.join(atm.TEMPLATE_FIELDS) + '\n1,2\n',
                          ','.join(atm.TEMPLATE_FIELDS) + '\n1,2,3,8,8,8,8,8,9\n']:
                 with self.subTest(body=body):
-                    path.write_text(body)
+                    path.write_text(body, encoding="utf-8")
                     with self.assertRaises(ValueError):
                         atm.load_templates(path, (100, 100))
 
@@ -82,7 +83,7 @@ class ValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'input.csv'
             self.write_csv(path)
-            path.write_text('\ufeff' + path.read_text())
+            path.write_text('\ufeff' + path.read_text(encoding='utf-8'), encoding='utf-8')
             self.assertEqual(atm.load_templates(path, (100, 100))[0]['cx'], 20)
 
     def test_edges_padding_and_research_do_not_shrink(self):
@@ -129,7 +130,8 @@ class ValidationTests(unittest.TestCase):
             self.write_csv(path)
             run = subprocess.run([sys.executable, str(ROOT / '02_code/affine_template_matching.py'),
                 '--nogui', '--video', str(ROOT / '01_input/input.mp4'), '--csv', str(path)],
-                cwd=tmp, capture_output=True, text=True)
+                cwd=tmp, capture_output=True, text=True, encoding='utf-8',
+                env=dict(os.environ, PYTHONIOENCODING='utf-8'))
             self.assertEqual(run.returncode, 2)
             self.assertIn('行2 テンプレート', run.stderr)
             self.assertNotIn('Traceback', run.stderr)

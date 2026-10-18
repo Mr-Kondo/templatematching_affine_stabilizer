@@ -302,7 +302,7 @@ class TemplateGUI:
             return
         # Write current templates to CSV (ensure folder exists)
         self.csv.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.csv, 'w', newline='') as f:
+        with open(self.csv, 'w', newline='', encoding='utf-8') as f:
             w = csv.writer(f)
             w.writerow(['No.', 'x座標', 'y座標', 'テンプレートの大きさ（正方形）', '探索左', '探索右', '探索上', '探索下'])
             for t in self.tpls:
