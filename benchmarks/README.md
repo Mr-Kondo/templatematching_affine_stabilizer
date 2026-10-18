@@ -48,9 +48,9 @@ uv run python benchmarks/run_benchmark.py --mode synth --repeat 3   # 3回繰り
 
 ## 記録内容(`report.json` / `summary.md`)
 
-- **工程別時間**: `match`(マッチング)/ `split_png_dump`(PNG分解)/ `warp_and_write`(補正+書き出し)を別々に、`pipeline_total`(合計)も記録
+- **工程別時間**: `match`(マッチング)/ `estimate_matrices`(RANSAC行列推定)/ `warp_and_write_streamed`(読み込み→warp→書き出しの逐次処理)を別々に、`pipeline_total`(合計)も記録
 - **全体スループット**: frames_per_second、入出力フレーム数
-- **資源**: 最大メモリ(RSS。macOSはバイト、LinuxはKiBで取得したものをバイトに換算)、一時ファイル量(PNG中間ファイル)、出力サイズ
+- **資源**: 最大メモリ(RSS。macOSはバイト、LinuxはKiBで取得したものをバイトに換算)、一時ファイル量(逐次処理のため通常0)、出力サイズ
 - **環境**: プラットフォーム、Python、numpy/OpenCV/pandas/Pillow/tqdm のバージョン、Gitコミット、全CLIパラメータ、シード
 
 > メモ: `--repeat > 1` で同一プロセス内で複数回実行した場合、最大メモリは
@@ -59,12 +59,23 @@ uv run python benchmarks/run_benchmark.py --mode synth --repeat 3   # 3回繰り
 
 ## 既存パイプラインへの最小限の変更
 
-- `AffineCorrector.split()`: 幅・高さ・FPSを `self._geom` に保存
-- `AffineCorrector.correct(split=...)`: 分解済みフレームの再利用を許可(既定は従来通り)
-- `AffineCorrector._M()`: 推定統計(フレーム番号・点数・内点数・成否・推定行列)を
-  `self.estimate_stats` に記録
+補正工程は PNG 中間ファイルを介さない**逐次処理**になりました
+(`VideoCapture → 行列推定 → warp → VideoWriter`)。
 
-動作は従来と変わらず、GUIパスにも影響しません。
+- `AffineCorrector.correct()`: 1フレームずつ動画から読み込み、推定したアフィン行列で
+  warp して VideoWriter に書き出す。中間PNG(`temp/images`, `temp/converted`)は
+  通常時まったく生成しない。メモリはフレーム数に比例して増えない
+- `AffineCorrector.precompute()` / `_M()`(キャッシュ付き): 全フレームの行列推定を
+  事前に行える。ベンチマークが「推定」と「warp」の時間を分けて計測するために使用
+- `AffineCorrector._M()`: 推定統計(フレーム番号・点数・内点数・成否・推定行列)を
+  `estimate_stats` に記録
+- `TemplateMatcher.run()`: 読み込んだフレーム総数を `frame_count` に記録
+- GUI/CLI とも同じ逐次パスを使い、一時ディレクトリの後片付け(`cleanup()` と
+  `split()`、PNG中間出力)は廃止
+
+出力のフレーム対応は基準版(PNG経由)と同一: 出力はフレーム2..K(テンプレート抽出に
+使った先頭フレームは基準として保持し、書き出さない)。固定透視変換も含めて
+画素レベルで基準版と一致することを検証済み(下記「基準比較」)。
 
 ## 制限(スコープ外とするもの)
 

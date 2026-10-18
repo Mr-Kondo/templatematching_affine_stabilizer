@@ -30,7 +30,6 @@ import argparse
 import csv
 import gc
 import queue
-import shutil
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
@@ -205,6 +204,9 @@ class TemplateMatcher:
                     prog += 1
                     q.put(('prog', prog))
         self.cap.release()
+        # Total number of frames actually read (useful metadata for callers;
+        # the reference frame 1 is included even though it is not matched).
+        self.frame_count = idx
         # Ensure output directory exists
         out_path = Path(out_csv)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -220,47 +222,44 @@ class TemplateMatcher:
 
 
 class AffineCorrector:
-    """Correct video frames using affine (and perspective) transformations based on matched points."""
+    """Correct video frames using affine (and perspective) transformations based on matched points.
+
+    Frames are processed one at a time straight from the input video
+    (``VideoCapture -> matrix estimation -> warp -> VideoWriter``); no
+    intermediate images are written to disk, so memory and disk usage stay
+    constant regardless of the number of frames.
+    """
 
     def __init__(self,
                  video: str,
                  csv: str,
-                 outv: str = '03_output/Affined.mp4',
-                 tmp: str = 'temp'):
+                 outv: str = '03_output/Affined.mp4'):
         self.matches = pd.read_csv(csv)
         self.video = Path(video)
         self.out = Path(outv)
-        self.tmp = Path(tmp)
         # Diagnostics recorded for each affine-estimation call (frame, point count,
         # inlier count, success flag and the estimated 2x3 matrix).  Populated by
         # `_M` and consumed by the benchmark harness to compute tracking/estimation
         # failure rates and coordinate-domain accuracy metrics.
         self.estimate_stats: List[Dict[str, Any]] = []
-        self._geom: Tuple[int, int, float] | None = None
-        # Use a temporary directory inside the output folder for intermediate images
-        self.img = self.tmp / 'images'
-        self.conv = self.tmp / 'converted'
-        self.img.mkdir(parents=True, exist_ok=True)
-        self.conv.mkdir(parents=True, exist_ok=True)
+        # Per-frame matrix cache filled by `precompute()`; `correct()` reuses it so
+        # the estimation stage can be timed separately from the warp stage.
+        self._mcache: Dict[int, np.ndarray] = {}
 
-    def split(self) -> Tuple[int, int, float]:
-        """Split the input video into individual frames saved as PNGs in self.img."""
-        c = cv2.VideoCapture(str(self.video), apiPreference=cv2.CAP_FFMPEG)
-        fps = c.get(cv2.CAP_PROP_FPS)
-        w, h = int(c.get(3)), int(c.get(4))
-        idx = 1
-        while True:
-            ok, f = c.read()
-            if not ok:
-                break
-            cv2.imwrite(str(self.img / f'frame_{idx:06d}.png'), f)
-            idx += 1
-        c.release()
-        self._geom = (w, h, fps)
-        return w, h, fps
+    def precompute(self) -> None:
+        """Estimate and cache the affine matrix for every frame of the matches CSV."""
+        for n in sorted(self.matches.Frame_No.unique()):
+            self._M(int(n))
 
     def _M(self, n: int) -> np.ndarray:
-        """Estimate the affine matrix for frame n using matched control points."""
+        """Estimate the affine matrix for frame n using matched control points.
+
+        Results are cached per frame so repeated calls (e.g. after
+        `precompute()`) do not repeat the RANSAC estimation.
+        """
+        cached = self._mcache.get(n)
+        if cached is not None:
+            return cached
         df = self.matches[self.matches.Frame_No == n]
         src = df[['mx', 'my']].to_numpy(np.float32)
         dst = df[['x', 'y']].to_numpy(np.float32)
@@ -273,61 +272,68 @@ class AffineCorrector:
                  M=None if M is None else M.astype(float).tolist()))
         if M is None:
             raise RuntimeError('affine fail')
+        self._mcache[n] = M
         return M
 
-    def correct(self, q: queue.Queue | None = None, split: bool = True) -> None:
-        """Warp each frame using the estimated affine (plus optional perspective) transform and save the corrected video.
+    def correct(self, q: queue.Queue | None = None) -> None:
+        """Stream the input video once, warping each frame with its estimated transform.
+
+        The reference frame (frame 1, from which templates were extracted) is
+        not emitted, matching the behaviour of the original PNG-based
+        pipeline: the output contains frames 2..K.
 
         Parameters
         ----------
         q : Queue, optional
-            Progress queue as used by the GUI.
-        split : bool, optional
-            When False, reuse the frames already extracted by a previous call
-            to `split()` instead of re-reading the input video.  This allows
-            the benchmark harness to time the split and warp stages apart.
+            Progress queue as used by the GUI: ('setmax', total) once at the
+            start and ('prog', done) after each written frame.
         """
-        if split or self._geom is None:
-            w, h, fps = self.split()
-        else:
-            w, h, fps = self._geom
-        frames = sorted(self.img.glob('frame_*.png'))
+        cap = cv2.VideoCapture(str(self.video), apiPreference=cv2.CAP_FFMPEG)
+        if not cap.isOpened():
+            raise RuntimeError('cannot open video')
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        ok, _first = cap.read()
+        if not ok:
+            cap.release()
+            raise RuntimeError('cannot read video')
+        total = max(0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) - 1)
         if q:
-            q.put(('setmax', len(frames) - 1))
-            done = 0
+            q.put(('setmax', total))
         fourcc_fn = cv2.VideoWriter_fourcc if hasattr(
             cv2, 'VideoWriter_fourcc') else cv2.VideoWriter.fourcc
         # Ensure parent directory exists
         self.out.parent.mkdir(parents=True, exist_ok=True)
         out = cv2.VideoWriter(str(self.out), fourcc_fn(*'mp4v'), fps if fps > 0 else 30, (w, h))
-        for fp in tqdm(frames[1:], desc='warp'):
-            n = int(fp.stem.split('_')[1])
-            img = cv2.imread(str(fp))
-            # Apply the affine transformation
-            aff = cv2.warpAffine(img,
-                                 self._M(n), (w, h),
-                                 flags=cv2.INTER_LINEAR,
-                                 borderMode=cv2.BORDER_CONSTANT)
-            # Apply an optional perspective warp (sample implementation)
-            src_pts = np.float32([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]])
-            dst_pts = np.float32([
-                [10, 5],  # top-left
-                [w - 11, 10],  # top-right
-                [w - 6, h - 11],  # bottom-right
-                [5, h - 6],  # bottom-left
-            ])
-            M_persp = cv2.getPerspectiveTransform(src_pts, dst_pts)
-            persp = cv2.warpPerspective(aff, M_persp, (w, h))
-            out.write(persp)
-            cv2.imwrite(str(self.conv / f'conv_{n:06d}.png'), persp)
-            if q:
+        src_pts = np.float32([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]])
+        dst_pts = np.float32([
+            [10, 5],  # top-left
+            [w - 11, 10],  # top-right
+            [w - 6, h - 11],  # bottom-right
+            [5, h - 6],  # bottom-left
+        ])
+        M_persp = cv2.getPerspectiveTransform(src_pts, dst_pts)
+        done = 0
+        with tqdm(total=total, desc='warp') as bar:
+            while True:
+                ok, f = cap.read()
+                if not ok:
+                    break
+                n = 2 + done
+                # Apply the affine transformation
+                aff = cv2.warpAffine(f,
+                                     self._M(n), (w, h),
+                                     flags=cv2.INTER_LINEAR,
+                                     borderMode=cv2.BORDER_CONSTANT)
+                # Apply an optional perspective warp (sample implementation)
+                persp = cv2.warpPerspective(aff, M_persp, (w, h))
+                out.write(persp)
+                bar.update(1)
                 done += 1
-                q.put(('prog', done))
+                if q:
+                    q.put(('prog', done))
         out.release()
-
-    def cleanup(self) -> None:
-        """Remove the temporary directory used for intermediate frames."""
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        cap.release()
 
 
 # =============================================================================
@@ -623,12 +629,10 @@ class TemplateGUI:
             try:
                 # Run template matching; save matches into the output folder
                 TemplateMatcher(self.video, str(self.csv)).run('03_output/Matched.csv', q)
-                # Use the matched points to correct the video
+                # Use the matched points to correct the video (streamed: no
+                # intermediate PNG files are produced)
                 AffineCorrector(self.video, '03_output/Matched.csv',
                                 '03_output/Affined.mp4').correct(q)
-                # Clean up temporary files
-                AffineCorrector(self.video, '03_output/Matched.csv',
-                                '03_output/Affined.mp4').cleanup()
                 q.put(('done', None))
             except Exception as e:
                 q.put(('err', e))
@@ -701,10 +705,11 @@ def main() -> None:
         a.video = str(sorted(candidates)[0])
         print(f'[info] --video omitted; using {a.video}')
     if a.nogui:
-        # Batch mode: run matching and correction directly
+        # Batch mode: run matching and correction directly (streamed: no
+        # intermediate PNG files are produced)
         TemplateMatcher(a.video, a.csv).run('03_output/Matched.csv')
-        AffineCorrector(a.video, '03_output/Matched.csv', '03_output/Affined.mp4').correct()
-        AffineCorrector(a.video, '03_output/Matched.csv', '03_output/Affined.mp4').cleanup()
+        AffineCorrector(a.video, '03_output/Matched.csv',
+                        '03_output/Affined.mp4').correct()
     else:
         # Interactive GUI
         TemplateGUI(a.video, a.csv)
