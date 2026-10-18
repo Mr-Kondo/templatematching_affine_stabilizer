@@ -36,7 +36,6 @@ import argparse
 import json
 import platform
 import resource
-import shutil
 import subprocess
 import sys
 import time
@@ -259,7 +258,7 @@ def eval_video(run_dir: Path, estimate_stats: List[Dict[str, Any]],
 
 
 def run_once(args: argparse.Namespace, run_dir: Path) -> Dict[str, Any]:
-    """One benchmark run: prepare -> match -> split -> warp -> evaluate."""
+    """One benchmark run: prepare -> match -> estimate -> warp -> evaluate."""
     cv2.setRNGSeed(args.seed)
     report: Dict[str, Any] = {
         'status': 'ok',
@@ -291,17 +290,16 @@ def run_once(args: argparse.Namespace, run_dir: Path) -> Dict[str, Any]:
         matcher = TemplateMatcher(str(video_path), str(csv_path))
         matcher.run(str(run_dir / 'Matched.csv'))
         timings['match_s'] = time.perf_counter() - t0
+        n_input = matcher.frame_count
 
         corrector = AffineCorrector(str(video_path), str(run_dir / 'Matched.csv'),
-                                    str(run_dir / 'Affined.mp4'),
-                                    tmp=str(run_dir / 'tmp'))
+                                    str(run_dir / 'Affined.mp4'))
         t0 = time.perf_counter()
-        corrector.split()
-        timings['split_s'] = time.perf_counter() - t0
-        n_input = len(list(corrector.img.glob('frame_*.png')))
+        corrector.precompute()
+        timings['estimate_s'] = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        corrector.correct(split=False)
+        corrector.correct()
         timings['warp_s'] = time.perf_counter() - t0
     except Exception as e:  # keep a usable report even when the run fails
         timings['wall_end'] = time.perf_counter()
@@ -310,7 +308,7 @@ def run_once(args: argparse.Namespace, run_dir: Path) -> Dict[str, Any]:
                                if k.endswith('_s')}
         return report
 
-    pipeline_s = sum(timings[k] for k in ('match_s', 'split_s', 'warp_s'))
+    pipeline_s = sum(timings[k] for k in ('match_s', 'estimate_s', 'warp_s'))
     timings['pipeline_total_s'] = pipeline_s
     timings['wall_end'] = time.perf_counter()
 
@@ -319,8 +317,8 @@ def run_once(args: argparse.Namespace, run_dir: Path) -> Dict[str, Any]:
 
     report['timings_s'] = {
         'match': timings['match_s'],
-        'split_png_dump': timings['split_s'],
-        'warp_and_write': timings['warp_s'],
+        'estimate_matrices': timings['estimate_s'],
+        'warp_and_write_streamed': timings['warp_s'],
         'pipeline_total': pipeline_s,
         'prepare_synthetic': timings.get('prepare_s', 0.0),
     }
@@ -335,7 +333,9 @@ def run_once(args: argparse.Namespace, run_dir: Path) -> Dict[str, Any]:
         # NB: ru_maxrss is bytes on macOS, KiB on Linux.
         'max_rss_bytes': usage.ru_maxrss if sys.platform == 'darwin'
                          else usage.ru_maxrss * 1024,
-        'temp_png_bytes': dir_size(run_dir / 'tmp'),
+        # Streaming pipeline runs with no intermediate files; 0 proves the
+        # temp directory is not touched.
+        'temp_files_bytes': dir_size(run_dir / 'tmp'),
         'output_video_bytes': (run_dir / 'Affined.mp4').stat().st_size
                                if (run_dir / 'Affined.mp4').exists() else 0,
         'matched_csv_bytes': (run_dir / 'Matched.csv').stat().st_size
@@ -363,9 +363,6 @@ def run_once(args: argparse.Namespace, run_dir: Path) -> Dict[str, Any]:
             bg = bg_residuals_lk(video_path, tpl, est)
         report['accuracy'] = eval_video(run_dir, est, bg)
 
-    shutil.rmtree(run_dir / 'tmp', ignore_errors=True)
-    report['resources'].pop('temp_png_bytes', None)
-    report['resources']['temp_png_bytes_after_cleanup'] = 0
     return report
 
 
@@ -437,8 +434,8 @@ def write_report(run_dir: Path, env: Dict[str, Any],
     r = report.get('resources', {})
     if 'max_rss_bytes' in r:
         lines.append(f"- max RSS: {r['max_rss_bytes'] / 1024 / 1024:.1f} MiB")
-    lines.append(f"- temp PNG bytes (after cleanup): "
-                 f"{r.get('temp_png_bytes_after_cleanup', 'n/a')}")
+    lines.append(f"- temp files (bytes): {r.get('temp_files_bytes', 'n/a')} "
+                 "(streamed pipeline writes no intermediate files)")
     lines.append(f"- output video bytes: {r.get('output_video_bytes', 'n/a')}")
     lines.append("- note: with --repeat > 1 in one process, max RSS is the "
                  "process-lifetime peak (upper bound per run).")
