@@ -231,6 +231,12 @@ class AffineCorrector:
         self.video = Path(video)
         self.out = Path(outv)
         self.tmp = Path(tmp)
+        # Diagnostics recorded for each affine-estimation call (frame, point count,
+        # inlier count, success flag and the estimated 2x3 matrix).  Populated by
+        # `_M` and consumed by the benchmark harness to compute tracking/estimation
+        # failure rates and coordinate-domain accuracy metrics.
+        self.estimate_stats: List[Dict[str, Any]] = []
+        self._geom: Tuple[int, int, float] | None = None
         # Use a temporary directory inside the output folder for intermediate images
         self.img = self.tmp / 'images'
         self.conv = self.tmp / 'converted'
@@ -250,6 +256,7 @@ class AffineCorrector:
             cv2.imwrite(str(self.img / f'frame_{idx:06d}.png'), f)
             idx += 1
         c.release()
+        self._geom = (w, h, fps)
         return w, h, fps
 
     def _M(self, n: int) -> np.ndarray:
@@ -257,14 +264,33 @@ class AffineCorrector:
         df = self.matches[self.matches.Frame_No == n]
         src = df[['mx', 'my']].to_numpy(np.float32)
         dst = df[['x', 'y']].to_numpy(np.float32)
-        M, _ = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=2)
+        M, inliers = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=2)
+        self.estimate_stats.append(
+            dict(frame=n,
+                 points=int(len(src)),
+                 inliers=int(inliers.sum()) if inliers is not None else 0,
+                 ok=M is not None,
+                 M=None if M is None else M.astype(float).tolist()))
         if M is None:
             raise RuntimeError('affine fail')
         return M
 
-    def correct(self, q: queue.Queue | None = None) -> None:
-        """Warp each frame using the estimated affine (plus optional perspective) transform and save the corrected video."""
-        w, h, fps = self.split()
+    def correct(self, q: queue.Queue | None = None, split: bool = True) -> None:
+        """Warp each frame using the estimated affine (plus optional perspective) transform and save the corrected video.
+
+        Parameters
+        ----------
+        q : Queue, optional
+            Progress queue as used by the GUI.
+        split : bool, optional
+            When False, reuse the frames already extracted by a previous call
+            to `split()` instead of re-reading the input video.  This allows
+            the benchmark harness to time the split and warp stages apart.
+        """
+        if split or self._geom is None:
+            w, h, fps = self.split()
+        else:
+            w, h, fps = self._geom
         frames = sorted(self.img.glob('frame_*.png'))
         if q:
             q.put(('setmax', len(frames) - 1))
