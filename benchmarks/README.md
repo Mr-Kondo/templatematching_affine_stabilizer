@@ -42,9 +42,9 @@ uv run python benchmarks/run_benchmark.py --mode synth --repeat 3   # 3回繰り
 
 | 指標 | 意味 |
 |---|---|
-| `tracked_point_residual_px` | 追跡点の RANSAC フィット残差 `|M_k·(mx,my) − (x,y)|` |
+| `tracked_point_residual_px` | 追跡点の RANSAC フィット残差 `\|M_k·(mx,my) − (x,y)\|` |
 | `ransac_inlier_rate` / `outlier_point_rate` | フレームごとのRANSAC内点割合・外れ点率(追跡失敗率の代理) |
-| `background_residual_px_not_tracked`(`--bg-eval`時) | テンプレートROI外のShi-Tomasi特徴点をLK+FBチェックで追跡し、`|M_k·q_k − q_1|` を評価。追跡点とは独立な残留ずれ |
+| `background_residual_px_not_tracked`(`--bg-eval`時) | テンプレートROI外のShi-Tomasi特徴点をLK+FBチェックで追跡し、`\|M_k·q_k − q_1\|` を評価。追跡点とは独立な残留ずれ |
 
 ## 記録内容(`report.json` / `summary.md`)
 
