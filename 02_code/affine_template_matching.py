@@ -32,6 +32,7 @@ import gc
 import math
 import queue
 import threading
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 
@@ -90,15 +91,7 @@ def refine(mat: np.ndarray, loc: Sequence[int]) -> Tuple[float, float]:
 
 def crop(src: np.ndarray, cx: int, cy: int, h: int) -> np.ndarray:
     """Crop a square patch of size 2*h centred at (cx, cy), padding with zeros if necessary."""
-    x0, y0 = cx - h, cy - h
-    x1, y1 = cx + h, cy + h
-    H, W = src.shape[:2]
-    pl, pt = max(0, -x0), max(0, -y0)
-    pr, pb = max(0, x1 - W), max(0, y1 - H)
-    roi = src[max(0, y0):min(H, y1), max(0, x0):min(W, x1)]
-    if any((pl, pt, pr, pb)):
-        roi = cv2.copyMakeBorder(roi, pt, pb, pl, pr, cv2.BORDER_CONSTANT)
-    return roi
+    return crop_lrbt(src, cx, cy, h, h, h, h)
 
 
 def crop_lrbt(src: np.ndarray, cx: int, cy: int, left: int, right: int, top: int,
@@ -111,6 +104,10 @@ def crop_lrbt(src: np.ndarray, cx: int, cy: int, left: int, right: int, top: int
     x0, y0 = cx - left, cy - top
     x1, y1 = cx + right, cy + bottom
     H, W = src.shape[:2]
+    if left <= 0 or right <= 0 or top <= 0 or bottom <= 0:
+        raise ValueError('ROI: 各探索マージンは正の整数が必要です')
+    if x1 <= 0 or y1 <= 0 or x0 >= W or y0 >= H:
+        raise ValueError('ROI: 切出し領域が完全に画像外です')
     pl, pt = max(0, -x0), max(0, -y0)
     pr, pb = max(0, x1 - W), max(0, y1 - H)
     roi = src[max(0, y0):min(H, y1), max(0, x0):min(W, x1)]
@@ -149,40 +146,92 @@ MATCH_CCOEFF_ALARM = 0.78  # real clip min 0.819, synth normal min 0.854 (fn: oc
 MATCH_RESEARCH_GAIN = 0.005
 
 
+TEMPLATE_FIELDS = dict(zip(
+    ('No.', 'x座標', 'y座標', 'テンプレートの大きさ（正方形）', '探索左', '探索右', '探索上', '探索下'),
+    ('id', 'cx', 'cy', 'tpl', 'l', 'r', 't', 'b')))
+
+
+def template_integer(raw: Any, label: str) -> int:
+    try:
+        number = Decimal(str(raw))
+    except InvalidOperation:
+        raise ValueError(f'{label}: 有限の整数を指定してください') from None
+    if not number.is_finite() or number != number.to_integral_value():
+        raise ValueError(f'{label}: 有限の整数を指定してください')
+    # Avoid converting arbitrarily large exponents into an unbounded integer.
+    if abs(number) > 2**31 - 1:
+        raise ValueError(f'{label}: 整数が大きすぎます')
+    return int(number)
+
+
+def validate_template(row: Dict[str, Any], shape: Sequence[int], line: int) -> Dict[str, int]:
+    tpl = {key: template_integer(row.get(key), f'行{line} {column}')
+           for column, key in TEMPLATE_FIELDS.items()}
+    height, width = shape[:2]
+    limits = dict(id=(1, 2**31 - 1), cx=(0, width - 1), cy=(0, height - 1),
+                  tpl=(2, min(width, height)))
+    for key, (low, high) in limits.items():
+        if not low <= tpl[key] <= high:
+            column = next(c for c, k in TEMPLATE_FIELDS.items() if k == key)
+            raise ValueError(f'行{line} {column}: {low}〜{high}の範囲で指定してください')
+    if tpl['tpl'] % 2:
+        raise ValueError(f'行{line} テンプレートの大きさ（正方形）: 偶数を指定してください')
+    for column, key in list(TEMPLATE_FIELDS.items())[4:]:
+        maximum = width if key in ('l', 'r') else height
+        if not tpl['tpl'] // 2 <= tpl[key] <= maximum:
+            raise ValueError(f'行{line} {column}: テンプレート半辺以上、画像寸法{maximum}以下が必要です')
+    return tpl
+
+
+def validate_templates(rows: Sequence[Dict[str, Any]], shape: Sequence[int]) -> List[Dict[str, int]]:
+    templates = [validate_template(row, shape, line) for line, row in enumerate(rows, 2)]
+    ids = set()
+    for line, tpl in enumerate(templates, 2):
+        if tpl['id'] in ids:
+            raise ValueError(f"行{line} No.: ID {tpl['id']} が重複しています")
+        ids.add(tpl['id'])
+    if len({(t['cx'], t['cy']) for t in templates}) < 2:
+        raise ValueError('テンプレート: 相似変換の推定には異なる中心座標が2点以上必要です')
+    return templates
+
+
+def load_templates(path: str | Path, shape: Sequence[int]) -> List[Dict[str, int]]:
+    with open(path, newline='', encoding='utf-8-sig') as source:
+        reader = csv.DictReader(source, strict=True)
+        columns = reader.fieldnames or []
+        missing = set(TEMPLATE_FIELDS) - set(columns)
+        if missing or len(columns) != len(set(columns)):
+            raise ValueError(f'CSV列: 必須列の不足または重複があります ({", ".join(sorted(missing))})')
+        rows = []
+        for row in reader:
+            if None in row or any(row[c] is None for c in TEMPLATE_FIELDS):
+                raise ValueError(f'行{reader.line_num}: CSVの列数が一致しません')
+            rows.append({key: row[column] for column, key in TEMPLATE_FIELDS.items()})
+    return validate_templates(rows, shape)
+
+
 class TemplateMatcher:
     """Perform template matching on a video to track template locations over time."""
 
     def __init__(self, video: str, csv_path: str):
         self.cap = cv2.VideoCapture(video, apiPreference=cv2.CAP_FFMPEG)
         ok, first = self.cap.read()
-        assert ok, 'cannot read video'
-        # The first frame is used as the reference for template extraction
+        if not ok:
+            self.cap.release()
+            raise ValueError(f'動画を読み込めません: {video}')
         self.first = cv2.cvtColor(first, cv2.COLOR_BGR2GRAY)
-        self.templates = self._load(csv_path)
+        try:
+            self.templates = self._load(csv_path)
+        except (OSError, ValueError, csv.Error):
+            self.cap.release()
+            raise
 
     def _load(self, p: str) -> List[Dict[str, Any]]:
-        """Load template definitions from a CSV file."""
-        df = pd.read_csv(p)
-        out: List[Dict[str, Any]] = []
-        for _, r in df.iterrows():
-            half_tpl = int(r['テンプレートの大きさ（正方形）']) // 2
-            top = int(r['探索上'])
-            bottom = int(r['探索下'])
-            left = int(r['探索左'])
-            right = int(r['探索右'])
-            out.append(
-                dict(
-                    id=int(r['No.']),
-                    cx=int(r['x座標']),
-                    cy=int(r['y座標']),
-                    th=half_tpl,
-                    t=top,
-                    b=bottom,
-                    l=left,
-                    r=right,
-                    patch=crop(self.first, int(r['x座標']), int(r['y座標']), half_tpl),
-                ))
-        return out
+        templates = load_templates(p, self.first.shape)
+        return [dict(id=t['id'], cx=t['cx'], cy=t['cy'], th=t['tpl'] // 2,
+                     l=t['l'], r=t['r'], t=t['t'], b=t['b'],
+                     patch=crop(self.first, t['cx'], t['cy'], t['tpl'] // 2))
+                for t in templates]
 
     def _match(self, g: np.ndarray, t: Dict[str, Any]) -> Tuple[float, float, Dict[str, Any]]:
         """Match a single template t in the current grayscale frame g.
@@ -205,10 +254,10 @@ class TemplateMatcher:
         re_searched = expanded = False
         if trigger:
             H, W = g.shape[:2]
-            l2 = min(max(int(t['l'] * MATCH_EXPAND_FACTOR), t['l'] + 16), t['cx'])
-            r2 = min(max(int(t['r'] * MATCH_EXPAND_FACTOR), t['r'] + 16), W - 1 - t['cx'])
-            t2 = min(max(int(t['t'] * MATCH_EXPAND_FACTOR), t['t'] + 16), t['cy'])
-            b2 = min(max(int(t['b'] * MATCH_EXPAND_FACTOR), t['b'] + 16), H - 1 - t['cy'])
+            l2 = min(max(int(t['l'] * MATCH_EXPAND_FACTOR), t['l'] + 16), max(t['cx'], t['l']))
+            r2 = min(max(int(t['r'] * MATCH_EXPAND_FACTOR), t['r'] + 16), max(W - 1 - t['cx'], t['r']))
+            t2 = min(max(int(t['t'] * MATCH_EXPAND_FACTOR), t['t'] + 16), max(t['cy'], t['t']))
+            b2 = min(max(int(t['b'] * MATCH_EXPAND_FACTOR), t['b'] + 16), max(H - 1 - t['cy'], t['b']))
             if (l2, r2, t2, b2) != (t['l'], t['r'], t['t'], t['b']):
                 mx2, my2, s2, c2, e2, cc2 = self._match_window(g, t, l2, r2, t2, b2)
                 re_searched = True
@@ -327,7 +376,7 @@ class TemplateMatcher:
 # residual 1.259 px, inlier spread std min 14.6 px) and on the frame-to-frame
 # matrix deltas of the same clip (|Δt| max 4.65 px, |Δscale| max 0.006,
 # |Δrot| max 0.243 deg).  See benchmarks/README.md "信頼度評価".
-EST_INLIER_COUNT_MIN = 3    # minimum RANSAC inliers for a usable partial affine
+EST_INLIER_COUNT_MIN = 3    # quality threshold; two distinct pairs suffice for estimation
 EST_INLIER_RATIO_MIN = 0.6  # inliers / points (real clip min = 3/5)
 EST_RESIDUAL_MAX = 2.0      # px, max residual of adopted points (= RANSAC threshold)
 EST_SPREAD_MIN = 10.0       # px, per-axis std of inlier positions (degenerate config)
@@ -584,6 +633,11 @@ class TemplateGUI:
         self.video = video
         self.csv = Path(csv_p)
         self.cap = cv2.VideoCapture(video, apiPreference=cv2.CAP_FFMPEG)
+        ok, first = self.cap.read()
+        if not ok:
+            self.cap.release()
+            raise ValueError(f'動画を読み込めません: {video}')
+        self.frame_shape = first.shape
         self.total = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.tpls: List[Dict[str, Any]] = []
         self.hist: List[Dict[str, Any]] = []
@@ -678,21 +732,16 @@ class TemplateGUI:
         """Load existing templates from the CSV if it exists."""
         if not self.csv.exists():
             return
-        df = pd.read_csv(self.csv)
+        try:
+            templates = load_templates(self.csv, self.frame_shape)
+        except (OSError, ValueError, csv.Error) as error:
+            self.messagebox.showerror('入力エラー', str(error))
+            return
         self.tpls.clear()
         self.tree.delete(*self.tree.get_children())
-        for _, r in df.iterrows():
-            self._add_tpl(
-                int(r['x座標']),
-                int(r['y座標']),
-                int(r['テンプレートの大きさ（正方形）']),
-                int(r['探索左']),
-                int(r['探索右']),
-                int(r['探索上']),
-                int(r['探索下']),
-                existing=True,
-                id=int(r['No.']),
-            )
+        for t in templates:
+            self._add_tpl(t['cx'], t['cy'], t['tpl'], t['l'], t['r'], t['t'], t['b'],
+                          existing=True, id=t['id'])
 
     def _add_tpl(
         self,
@@ -708,9 +757,9 @@ class TemplateGUI:
     ) -> None:
         """Append a new template entry to the list and TreeView."""
         if not existing:
-            id = len(self.tpls) + 1
-        assert id is not None
-        d = dict(id=id, cx=cx, cy=cy, tpl=tpl, l=left, r=right, t=top, b=bottom)
+            id = max((t['id'] for t in self.tpls + self.hist), default=0) + 1
+        d = validate_template(dict(id=id, cx=cx, cy=cy, tpl=tpl, l=left, r=right,
+                                   t=top, b=bottom), self.frame_shape, len(self.tpls) + 2)
         self.tpls.append(d)
         self.tree.insert('',
                          'end',
@@ -763,16 +812,13 @@ class TemplateGUI:
         self._show(int(float(val)))
 
     def _click(self, e) -> None:
-        # Parse numeric values from entries
-        tpl = int(self.ent_tpl.get()) + int(self.ent_tpl.get()) % 2
-        left = int(self.ent_left.get())
-        right = int(self.ent_right.get())
-        top = int(self.ent_top.get())
-        bottom = int(self.ent_bottom.get())
-        # Map canvas (zoomed) coords back to original image
-        orig_x = int(e.x / self.zoom)
-        orig_y = int(e.y / self.zoom)
-        self._add_tpl(orig_x, orig_y, tpl, left, right, top, bottom)
+        try:
+            self._add_tpl(int(e.x / self.zoom), int(e.y / self.zoom),
+                          self.ent_tpl.get(), self.ent_left.get(), self.ent_right.get(),
+                          self.ent_top.get(), self.ent_bottom.get())
+        except ValueError as error:
+            self.messagebox.showerror('入力エラー', str(error))
+            return
         self._show(int(self.scale.get()))
 
     def _del(self) -> None:
@@ -801,6 +847,7 @@ class TemplateGUI:
         if not iid:
             return
         row = next(t for t in self.tpls if t['id'] == int(iid))
+        edited = row.copy()
         for key in ('cx', 'cy', 'tpl', 'l', 'r', 't', 'b'):
             val = self.simpledialog.askinteger('Edit',
                                                f'{key} value',
@@ -809,7 +856,13 @@ class TemplateGUI:
                                                minvalue=0)
             if val is None:
                 return
-            row[key] = val
+            edited[key] = val
+        try:
+            edited = validate_template(edited, self.frame_shape, self.tpls.index(row) + 2)
+        except ValueError as error:
+            self.messagebox.showerror('入力エラー', str(error))
+            return
+        row.update(edited)
         self.tree.item(iid,
                        values=(row['id'], row['cx'], row['cy'], row['tpl'], row['l'], row['r'],
                                row['t'], row['b']))
@@ -830,8 +883,10 @@ class TemplateGUI:
 
     # -------- execute --------
     def _exec(self) -> None:
-        if len(self.tpls) < 3:
-            self.messagebox.showwarning('warn', 'テンプレートは3点以上必要')
+        try:
+            self.tpls = validate_templates(self.tpls, self.frame_shape)
+        except ValueError as error:
+            self.messagebox.showerror('入力エラー', str(error))
             return
         # Write current templates to CSV (ensure folder exists)
         self.csv.parent.mkdir(parents=True, exist_ok=True)
@@ -928,7 +983,10 @@ def main() -> None:
     if a.nogui:
         # Batch mode: run matching and correction directly (streamed: no
         # intermediate PNG files are produced)
-        matcher = TemplateMatcher(a.video, a.csv)
+        try:
+            matcher = TemplateMatcher(a.video, a.csv)
+        except (OSError, ValueError, csv.Error) as error:
+            p.error(str(error))
         matcher.run('03_output/Matched.csv')
         corrector = AffineCorrector(a.video, '03_output/Matched.csv',
                                     '03_output/Affined.mp4')
