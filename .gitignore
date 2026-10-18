@@ -5,3 +5,6 @@ venv/
 # Byte-compiled / cache
 __pycache__/
 *.py[cod]
+
+# Benchmark run artifacts (timestamped run dirs are local-only)
+03_output/benchmark/
