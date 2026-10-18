@@ -28,10 +28,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+from contextlib import contextmanager
 import gc
 import math
+import os
 import queue
 import threading
+import tempfile
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
@@ -44,6 +48,65 @@ from tqdm import tqdm
 # =============================================================================
 # Utils
 # =============================================================================
+
+
+@contextmanager
+def output_files(paths: Sequence[Path]):
+    for path in paths:
+        if path.exists() or path.is_symlink():
+            raise FileExistsError(f'既存出力は上書きしません: {path}')
+        path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.stabilizer-', dir=paths[0].parent) as folder:
+        staged = [Path(folder) / p.name for p in paths]
+        published = []
+        try:
+            yield staged
+            for source, destination in zip(staged, paths):
+                os.link(source, destination)
+                published.append(destination)
+        except BaseException:
+            for path in published:
+                path.unlink()
+            raise
+
+
+@contextmanager
+def open_video(path: str | Path):
+    cap = cv2.VideoCapture(str(path), apiPreference=cv2.CAP_FFMPEG)
+    try:
+        if not cap.isOpened():
+            raise ValueError(f'動画を開けません: {path}')
+        yield cap
+    finally:
+        cap.release()
+
+
+def verify_video(path: Path, expected: int) -> None:
+    with open_video(path) as cap:
+        count = 0
+        while cap.read()[0]:
+            count += 1
+    if count != expected or count == 0:
+        raise RuntimeError(f'動画の書込検証に失敗: {path} ({count}/{expected}フレーム)')
+
+
+def run_pipeline(video: str, csv_path: str, outdir: str | Path, q=None):
+    folder = Path(outdir)
+    paths = [folder / name for name in ('Matched.csv', 'Matched_diagnostics.csv',
+                                        'Affined.mp4', 'Affined_diagnostics.csv')]
+    inputs = {Path(video).resolve(), Path(csv_path).resolve()}
+    if any(path.resolve() in inputs for path in paths):
+        raise ValueError('入力と出力を同じパスにできません')
+    matcher = TemplateMatcher(video, csv_path)
+    try:
+        with output_files(paths) as staged:
+            matcher.run(str(staged[0]), q)
+            corrector = AffineCorrector(video, str(staged[0]), str(staged[2]))
+            corrector.precompute()
+            corrector.correct(q)
+    finally:
+        matcher.cap.release()
+    return matcher, corrector
 
 
 def _pil_to_tk_photo(pil_img, tk_module):
@@ -311,59 +374,64 @@ class TemplateMatcher:
             ('setmax', total_frames-1) once at the start and ('prog', frame)
             after each processed frame.
         """
-        rec: List[List[float]] = []
-        diag: List[Dict[str, Any]] = []
-        previous_pos: Dict[int, Tuple[float, float]] = {
-            t['id']: (float(t['cx']), float(t['cy'])) for t in self.templates}
-        idx = 1
-        total = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)) - 1
-        # Initialise progress counter; always define prog to avoid UnboundLocalError
-        prog = 0
-        if q:
-            q.put(('setmax', total))
-        with tqdm(total=total, desc='match') as bar:
-            while True:
-                ok, f = self.cap.read()
-                if not ok:
-                    break
-                idx += 1
-                g = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
-                for t in self.templates:
-                    mx, my, d = self._match(g, t)
-                    rec.append([idx, t['id'], t['cx'], t['cy'], mx, my])
-                    # Inter-frame position jump of the same template: catches
-                    # gross mismatches that per-frame scores cannot see
-                    # (e.g. objects moving across the template ROI).
-                    dxp = math.hypot(mx - previous_pos[t['id']][0],
-                                     my - previous_pos[t['id']][1])
-                    d['delta_px'] = round(float(dxp), 4)
-                    d['low_conf'] = bool(d['low_conf'] or d['delta_px'] > MATCH_DELTA_MAX)
-                    previous_pos[t['id']] = (mx, my)
-                    diag.append([idx, t['id'], d['score'], d['clearness'],
-                                 d['ccoeff_peak'], d['roi_edge'], d['delta_px'],
-                                 d['re_searched'], d['expanded_adopted'], d['low_conf']])
-                bar.update(1)
-                if q:
-                    prog += 1
-                    q.put(('prog', prog))
-        self.cap.release()
-        # Total number of frames actually read (useful metadata for callers;
-        # the reference frame 1 is included even though it is not matched).
-        self.frame_count = idx
-        self.match_stats = diag
-        # Ensure output directory exists
-        out_path = Path(out_csv)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(rec, columns=['Frame_No', 'Template_No', 'x', 'y', 'mx',
-                                   'my']).to_csv(out_path, index=False)
-        # Confidence diagnostics (separate file: the Matched.csv format is
-        # unchanged for existing consumers).
-        pd.DataFrame(diag, columns=['Frame_No', 'Template_No', 'score', 'clearness',
-                                    'ccoeff_peak', 'roi_edge', 'delta_px', 're_searched',
-                                    'expanded_adopted', 'low_conf']).to_csv(
-            out_path.with_name(out_path.stem + '_diagnostics.csv'), index=False)
-        del self.first
-        gc.collect()
+        try:
+            rec: List[List[float]] = []
+            diag: List[Dict[str, Any]] = []
+            previous_pos: Dict[int, Tuple[float, float]] = {
+                t['id']: (float(t['cx']), float(t['cy'])) for t in self.templates}
+            idx = 1
+            total = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)) - 1
+            # Initialise progress counter; always define prog to avoid UnboundLocalError
+            prog = 0
+            if q:
+                q.put(('setmax', total))
+            with tqdm(total=total, desc='match') as bar:
+                while True:
+                    ok, f = self.cap.read()
+                    if not ok:
+                        break
+                    idx += 1
+                    g = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+                    for t in self.templates:
+                        mx, my, d = self._match(g, t)
+                        rec.append([idx, t['id'], t['cx'], t['cy'], mx, my])
+                        # Inter-frame position jump of the same template: catches
+                        # gross mismatches that per-frame scores cannot see
+                        # (e.g. objects moving across the template ROI).
+                        dxp = math.hypot(mx - previous_pos[t['id']][0],
+                                         my - previous_pos[t['id']][1])
+                        d['delta_px'] = round(float(dxp), 4)
+                        d['low_conf'] = bool(d['low_conf'] or d['delta_px'] > MATCH_DELTA_MAX)
+                        previous_pos[t['id']] = (mx, my)
+                        diag.append([idx, t['id'], d['score'], d['clearness'],
+                                     d['ccoeff_peak'], d['roi_edge'], d['delta_px'],
+                                     d['re_searched'], d['expanded_adopted'], d['low_conf']])
+                    bar.update(1)
+                    if q:
+                        prog += 1
+                        q.put(('prog', prog))
+            # Total number of frames actually read (useful metadata for callers;
+            # the reference frame 1 is included even though it is not matched).
+            self.frame_count = idx
+            self.match_stats = diag
+            # Ensure output directory exists
+            out_path = Path(out_csv)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            if total >= 0 and idx != total + 1:
+                raise RuntimeError(f'動画の途中読込に失敗: {idx}/{total + 1}フレーム')
+            with output_files([out_path, out_path.with_name(out_path.stem + '_diagnostics.csv')]) as staged:
+                pd.DataFrame(rec, columns=['Frame_No', 'Template_No', 'x', 'y', 'mx',
+                                           'my']).to_csv(staged[0], index=False)
+                # Confidence diagnostics (separate file: the Matched.csv format is
+                # unchanged for existing consumers).
+                pd.DataFrame(diag, columns=['Frame_No', 'Template_No', 'score', 'clearness',
+                                            'ccoeff_peak', 'roi_edge', 'delta_px', 're_searched',
+                                            'expanded_adopted', 'low_conf']).to_csv(
+                    staged[1], index=False)
+            del self.first
+            gc.collect()
+        finally:
+            self.cap.release()
 
 
 # =============================================================================
@@ -444,12 +512,14 @@ class AffineCorrector:
         p = Path(path) if path is not None else self.out.with_name(
             self.out.stem + '_diagnostics.csv')
         p.parent.mkdir(parents=True, exist_ok=True)
-        if self.estimate_stats:
-            df = pd.DataFrame(self.estimate_stats)
-            df['est_ok'] = df['ok']
-            df[[c for c in cols if c in df.columns]].to_csv(p, index=False)
-        else:
-            pd.DataFrame(columns=cols).to_csv(p, index=False)
+        with output_files([p]) as staged:
+            if self.estimate_stats:
+                df = pd.DataFrame(self.estimate_stats)
+                df['est_ok'] = df['ok']
+                df[[c for c in cols if c in df.columns]].to_csv(staged[0], index=False)
+            else:
+                pd.DataFrame(columns=cols).to_csv(staged[0], index=False)
+
 
     def _M(self, n: int) -> np.ndarray:
         """Estimate the affine matrix for frame n using matched control points.
@@ -543,67 +613,49 @@ class AffineCorrector:
             Progress queue as used by the GUI: ('setmax', total) once at the
             start and ('prog', done) after each written frame.
         """
-        cap = cv2.VideoCapture(str(self.video), apiPreference=cv2.CAP_FFMPEG)
-        if not cap.isOpened():
-            raise RuntimeError('cannot open video')
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        ok, first = cap.read()
-        if not ok:
-            cap.release()
-            raise RuntimeError('cannot read video')
+        if self.video.resolve() == self.out.resolve():
+            raise ValueError('入力動画と出力動画を同じパスにできません')
+        with open_video(self.video) as cap, output_files([self.out]) as staged:
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if width < 2 or height < 2 or not math.isfinite(fps) or fps <= 0:
+                raise ValueError('動画の寸法・FPSが不正です')
+            writer = cv2.VideoWriter(str(staged[0]), cv2.VideoWriter_fourcc(*'mp4v'),
+                                     fps, (width, height))
+            try:
+                if not writer.isOpened():
+                    raise RuntimeError(f'動画の出力を開始できません: {self.out}')
+                done = self._warp_frames(cap, writer, q)
+            finally:
+                writer.release()
+            verify_video(staged[0], done)
+
+    def _warp_frames(self, cap, writer, q) -> int:
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total = max(0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
-        if q:
+        if q is not None:
             q.put(('setmax', total))
-        fourcc_fn = cv2.VideoWriter_fourcc if hasattr(
-            cv2, 'VideoWriter_fourcc') else cv2.VideoWriter.fourcc
-        # Ensure parent directory exists
-        self.out.parent.mkdir(parents=True, exist_ok=True)
-        out = cv2.VideoWriter(str(self.out), fourcc_fn(*'mp4v'), fps if fps > 0 else 30, (w, h))
-        src_pts = np.float32([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]])
-        dst_pts = np.float32([
-            [10, 5],  # top-left
-            [w - 11, 10],  # top-right
-            [w - 6, h - 11],  # bottom-right
-            [5, h - 6],  # bottom-left
-        ])
-        M_persp = cv2.getPerspectiveTransform(src_pts, dst_pts)
+        source = np.float32([[0, 0], [width-1, 0], [width-1, height-1], [0, height-1]])
+        target = np.float32([[10, 5], [width-11, 10], [width-6, height-11], [5, height-6]])
+        perspective = cv2.getPerspectiveTransform(source, target)
         done = 0
         with tqdm(total=total, desc='warp') as bar:
-            # Frame 1: reference frame. Emit it with the identity affine
-            # (composed with the fixed perspective) so the output frame
-            # count matches the input and correspondence stays 1:1.
-            out.write(cv2.warpPerspective(first,
-                                          M_persp,
-                                          (w, h),
-                                          flags=cv2.INTER_LINEAR,
-                                          borderMode=cv2.BORDER_CONSTANT))
-            bar.update(1)
-            done = 1
-            if q:
-                q.put(('prog', done))
             while True:
-                ok, f = cap.read()
+                ok, frame = cap.read()
                 if not ok:
                     break
-                n = 1 + done
-                # Compose the fixed perspective transform with the per-frame
-                # affine matrix (both map source -> destination coordinates)
-                # so the frame is resampled exactly once.
-                a = self._M(n)
-                h_mat = M_persp @ np.vstack([a, [0.0, 0.0, 1.0]])
-                warp = cv2.warpPerspective(f,
-                                           h_mat,
-                                           (w, h),
-                                           flags=cv2.INTER_LINEAR,
-                                           borderMode=cv2.BORDER_CONSTANT)
-                out.write(warp)
-                bar.update(1)
+                affine = np.eye(3) if done == 0 else np.vstack([self._M(done + 1), [0, 0, 1]])
+                writer.write(cv2.warpPerspective(frame, perspective @ affine, (width, height),
+                                                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT))
                 done += 1
-                if q:
+                bar.update(1)
+                if q is not None:
                     q.put(('prog', done))
-        out.release()
-        cap.release()
+        if done == 0 or (total > 0 and done != total):
+            raise RuntimeError(f'動画の途中読込に失敗: {done}/{total}フレーム')
+        return done
 
 
 # =============================================================================
@@ -633,21 +685,24 @@ class TemplateGUI:
         self.video = video
         self.csv = Path(csv_p)
         self.cap = cv2.VideoCapture(video, apiPreference=cv2.CAP_FFMPEG)
-        ok, first = self.cap.read()
-        if not ok:
+        try:
+            ok, first = self.cap.read()
+            if not ok:
+                self.cap.release()
+                raise ValueError(f'動画を読み込めません: {video}')
+            self.frame_shape = first.shape
+            self.total = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.tpls: List[Dict[str, Any]] = []
+            self.hist: List[Dict[str, Any]] = []
+            self.zoom = 1.0
+            self.root = tk.Tk()
+            self.root.title('Template Designer')
+            self._build_widgets()
+            self._load_csv()
+            self._show(1)
+            self.root.mainloop()
+        finally:
             self.cap.release()
-            raise ValueError(f'動画を読み込めません: {video}')
-        self.frame_shape = first.shape
-        self.total = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.tpls: List[Dict[str, Any]] = []
-        self.hist: List[Dict[str, Any]] = []
-        self.zoom = 1.0
-        self.root = tk.Tk()
-        self.root.title('Template Designer')
-        self._build_widgets()
-        self._load_csv()
-        self._show(1)
-        self.root.mainloop()
 
     # -------- widgets --------
     def _build_widgets(self) -> None:
@@ -901,14 +956,11 @@ class TemplateGUI:
         self.btn_execute.config(state='disabled')
         q: queue.Queue[Tuple[str, Any]] = queue.Queue()
 
+        self.outdir = Path('03_output') / datetime.now().strftime('run_%Y%m%d_%H%M%S_%f')
+
         def task() -> None:
             try:
-                # Run template matching; save matches into the output folder
-                TemplateMatcher(self.video, str(self.csv)).run('03_output/Matched.csv', q)
-                # Use the matched points to correct the video (streamed: no
-                # intermediate PNG files are produced)
-                AffineCorrector(self.video, '03_output/Matched.csv',
-                                '03_output/Affined.mp4').correct(q)
+                run_pipeline(self.video, str(self.csv), self.outdir, q)
                 q.put(('done', None))
             except Exception as e:
                 q.put(('err', e))
@@ -963,6 +1015,7 @@ def main() -> None:
     p.add_argument('--nogui',
                    action='store_true',
                    help='Run in batch mode without launching the GUI')
+    p.add_argument('--outdir', default='03_output', help='Output directory (existing files are never overwritten)')
     a = p.parse_args()
     # Auto-pick first MP4 in 01_input when --video is omitted
     if a.video is None:
@@ -984,14 +1037,9 @@ def main() -> None:
         # Batch mode: run matching and correction directly (streamed: no
         # intermediate PNG files are produced)
         try:
-            matcher = TemplateMatcher(a.video, a.csv)
-        except (OSError, ValueError, csv.Error) as error:
+            matcher, corrector = run_pipeline(a.video, a.csv, a.outdir)
+        except (OSError, ValueError, csv.Error, RuntimeError) as error:
             p.error(str(error))
-        matcher.run('03_output/Matched.csv')
-        corrector = AffineCorrector(a.video, '03_output/Matched.csv',
-                                    '03_output/Affined.mp4')
-        corrector.precompute()
-        corrector.correct()
         # Confidence report: estimation success and quality pass are separate
         # verdicts (issue #8).  Low-confidence matches are flagged in the
         # diagnostics files, they do not stop the pipeline.
@@ -1005,8 +1053,8 @@ def main() -> None:
         print(f'[report] quality: pass {n_est - len(q_fail)}  fail {len(q_fail)}'
               + (f'  (frames {q_fail[:20]})' if q_fail else ''))
         print(f'[report] low-confidence matches: {low} / {len(matcher.match_stats)} '
-              f'(details: 03_output/Matched_diagnostics.csv, '
-              f'03_output/Affined_diagnostics.csv)')
+              f'(details: {a.outdir}/Matched_diagnostics.csv, '
+              f'{a.outdir}/Affined_diagnostics.csv)')
     else:
         # Interactive GUI
         TemplateGUI(a.video, a.csv)
