@@ -51,7 +51,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / '02_code'))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from affine_template_matching import AffineCorrector, TemplateMatcher  # noqa: E402
+from affine_template_matching import (AffineCorrector, TemplateMatcher,  # noqa: E402
+                                      EST_DELTA_ROT_MAX, EST_DELTA_SCALE_MAX,
+                                      EST_DELTA_T_MAX, EST_INLIER_COUNT_MIN,
+                                      EST_INLIER_RATIO_MIN, EST_RESIDUAL_MAX,
+                                      EST_SPREAD_MIN, MATCH_CCOEFF_ALARM,
+                                      MATCH_CLEAR_MIN, MATCH_DELTA_MAX,
+                                      MATCH_SCORE_MIN)
 import synth as synth_gen  # noqa: E402
 
 
@@ -315,6 +321,43 @@ def run_once(args: argparse.Namespace, run_dir: Path) -> Dict[str, Any]:
     est = corrector.estimate_stats
     est_fail = sum(1 for s in est if not s.get('ok'))
 
+    # Quality aggregation (issue #8): estimation success and quality pass are
+    # reported independently, alongside the calibrated thresholds.
+    quality: Dict[str, Any] = {'thresholds': {
+        'match_score_min': MATCH_SCORE_MIN,
+        'match_clear_min': MATCH_CLEAR_MIN,
+        'match_ccoeff_alarm': MATCH_CCOEFF_ALARM,
+        'match_delta_max_px': MATCH_DELTA_MAX,
+        'est_inlier_count_min': EST_INLIER_COUNT_MIN,
+        'est_inlier_ratio_min': EST_INLIER_RATIO_MIN,
+        'est_residual_max_px': EST_RESIDUAL_MAX,
+        'est_spread_min_px': EST_SPREAD_MIN,
+        'est_delta_t_max_px': EST_DELTA_T_MAX,
+        'est_delta_scale_max': EST_DELTA_SCALE_MAX,
+        'est_delta_rot_max_deg': EST_DELTA_ROT_MAX,
+    }}
+    try:
+        dmatch = pd.read_csv(run_dir / 'Matched_diagnostics.csv')
+        dest = pd.read_csv(run_dir / 'Affined_diagnostics.csv')
+        quality['matching'] = {
+            'rows': int(len(dmatch)),
+            'low_conf': int(dmatch['low_conf'].sum()) if len(dmatch) else 0,
+            're_searched': int(dmatch['re_searched'].sum()) if len(dmatch) else 0,
+            'expanded_adopted': int(dmatch['expanded_adopted'].sum()) if len(dmatch) else 0,
+            'roi_edge': int(dmatch['roi_edge'].sum()) if len(dmatch) else 0,
+        }
+        quality['estimation'] = {
+            'frames': int(len(dest)),
+            'est_fail': int((~dest['est_ok']).sum()) if len(dest) else 0,
+            'quality_fail': int((~dest['quality_ok']).sum()) if len(dest) else 0,
+            'quality_fail_frames': [int(v) for v in dest.loc[~dest['quality_ok'], 'frame']]
+                                   if len(dest) else [],
+        }
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        quality['matching'] = None
+        quality['estimation'] = None
+    report['quality'] = quality
+
     report['timings_s'] = {
         'match': timings['match_s'],
         'estimate_matrices': timings['estimate_s'],
@@ -454,6 +497,25 @@ def write_report(run_dir: Path, env: Dict[str, Any],
                                  f"({len(v2)} values, see report.json)")
         else:
             lines.append(f"- {k}: {v}")
+    lines += ["", "## Quality", ""]
+    qual = report.get('quality', {})
+    thr = qual.get('thresholds', {})
+    if thr:
+        lines.append("- thresholds: " + ', '.join(f"{k}={v}" for k, v in thr.items()))
+    m = qual.get('matching')
+    if m:
+        lines.append(f"- matching: {m['rows']} rows, low_conf {m['low_conf']}, "
+                     f"re_searched {m['re_searched']}, "
+                     f"expanded_adopted {m['expanded_adopted']}, "
+                     f"roi_edge {m['roi_edge']}")
+    e = qual.get('estimation')
+    if e:
+        lines.append(f"- estimation: {e['frames']} frames, est_fail {e['est_fail']}, "
+                     f"quality_fail {e['quality_fail']} "
+                     f"(frames: {e['quality_fail_frames'][:20] or '-'})")
+        lines.append("- est_fail (estimation success) and quality_fail (quality pass) "
+                     "are reported independently")
+
     lines += ["", "## Resources", ""]
     r = report.get('resources', {})
     if 'max_rss_bytes' in r:

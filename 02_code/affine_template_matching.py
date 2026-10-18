@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import csv
 import gc
+import math
 import queue
 import threading
 from pathlib import Path
@@ -122,6 +123,31 @@ def crop_lrbt(src: np.ndarray, cx: int, cy: int, left: int, right: int, top: int
 # Matcher
 # =============================================================================
 
+# --- Confidence thresholds -------------------------------------------------------------------
+# Calibrated with measured distributions on the 306-frame real clip
+# (01_input/input.mp4, 1525 template matches) and synthetic degradation
+# scenarios (occlusion / illumination change / repeated pattern / moving
+# object).  Real-clip distributions: score min 0.9732, peak clearness min
+# 0.0062, inter-frame position delta max 4.67 px, ROI-edge peaks 0/1525.
+# See benchmarks/README.md "信頼度評価" for the recorded evaluation data.
+MATCH_SCORE_MIN = 0.95     # peak correlation must exceed this (occlusion defect: 0.91)
+MATCH_CLEAR_MIN = 0.0002   # peak - best alternative peak (repeated pattern: ~0.0001)
+MATCH_DELTA_MAX = 8.0      # px/frame jumped by the same template (gross errors: >16px)
+MATCH_EXPAND_FACTOR = 2.0  # ROI expansion factor for the low-confidence re-search
+# Second-score alarm (TM_CCOEFF_NORMED): CCORR keeps its illumination
+# invariance for the adopted position, but its normalised score stays high
+# (~0.98) even when a template is fully occluded, while CCOEFF drops to
+# ~0.5.  The CCOEFF peak is therefore recorded as an independent alarm
+# metric; the adopted position is still chosen by the CCORR criteria so the
+# match behaviour and the outputs are unchanged.
+MATCH_CCOEFF_ALARM = 0.78  # real clip min 0.819, synth normal min 0.854 (fn: occluded 0.48)
+# An enlarged-window candidate is only adopted as the match when it beats the
+# original peak by this margin: 1e-4-level CCORR differences are noise, and
+# swapping the peak on them measurably degraded accuracy in the synthetic
+# benchmark (measured: matched-error mean 12.2px / background residual 25.5px
+# without the margin, vs <=1px level with it).
+MATCH_RESEARCH_GAIN = 0.005
+
 
 class TemplateMatcher:
     """Perform template matching on a video to track template locations over time."""
@@ -158,15 +184,69 @@ class TemplateMatcher:
                 ))
         return out
 
-    def _match(self, g: np.ndarray, t: Dict[str, Any]) -> Tuple[float, float]:
-        """Match a single template t in the current grayscale frame g."""
-        roi = crop_lrbt(g, t['cx'], t['cy'], t['l'], t['r'], t['t'], t['b'])
+    def _match(self, g: np.ndarray, t: Dict[str, Any]) -> Tuple[float, float, Dict[str, Any]]:
+        """Match a single template t in the current grayscale frame g.
+
+        Returns the adopted position ``(mx, my)`` and the confidence
+        diagnostics of this match (score, peak clearness, ROI-edge flag,
+        whether a re-search with an enlarged window ran, and whether the
+        enlarged-window candidate was adopted).
+
+        Low-confidence matches (score / peak clearness below the calibrated
+        thresholds, or the peak sitting against the ROI border) trigger a
+        re-search with an enlarged ROI; the candidate with the higher
+        confidence (score, then peak clearness) is adopted.  The pipeline
+        never stops on low confidence: the match is always adopted and the
+        diagnostics mark it for reporting instead.
+        """
+        mx, my, score, clear, edge, ccoeff_peak = self._match_window(
+            g, t, t['l'], t['r'], t['t'], t['b'])
+        trigger = (score < MATCH_SCORE_MIN or clear < MATCH_CLEAR_MIN or edge)
+        re_searched = expanded = False
+        if trigger:
+            H, W = g.shape[:2]
+            l2 = min(max(int(t['l'] * MATCH_EXPAND_FACTOR), t['l'] + 16), t['cx'])
+            r2 = min(max(int(t['r'] * MATCH_EXPAND_FACTOR), t['r'] + 16), W - 1 - t['cx'])
+            t2 = min(max(int(t['t'] * MATCH_EXPAND_FACTOR), t['t'] + 16), t['cy'])
+            b2 = min(max(int(t['b'] * MATCH_EXPAND_FACTOR), t['b'] + 16), H - 1 - t['cy'])
+            if (l2, r2, t2, b2) != (t['l'], t['r'], t['t'], t['b']):
+                mx2, my2, s2, c2, e2, cc2 = self._match_window(g, t, l2, r2, t2, b2)
+                re_searched = True
+                # Adopt the most confident candidate (score, then clearness),
+                # but only on a clear win: noise-level score differences must
+                # not swap the peak (see MATCH_RESEARCH_GAIN).
+                if s2 > score + MATCH_RESEARCH_GAIN and (s2, c2) > (score, clear):
+                    mx, my, score, clear, edge, ccoeff_peak = mx2, my2, s2, c2, e2, cc2
+                    expanded = True
+        return mx, my, dict(score=round(float(score), 6),
+                            clearness=round(float(clear), 6),
+                            ccoeff_peak=round(float(ccoeff_peak), 6),
+                            roi_edge=bool(edge),
+                            re_searched=bool(re_searched),
+                            expanded_adopted=bool(expanded),
+                            low_conf=bool(trigger or ccoeff_peak < MATCH_CCOEFF_ALARM))
+
+    def _match_window(self, g: np.ndarray, t: Dict[str, Any], l: int, r: int, w: int,
+                      b: int) -> Tuple[float, float, float, float, bool, float]:
+        """Match template t within one specific search window (l, r, w, b margins).
+
+        Computes both surface metrics in the same window: the CCORR peak
+        (adoption criterion) and the CCOEFF peak (independent alarm metric
+        which degrades under occlusion even when CCORR stays high).
+        """
+        roi = crop_lrbt(g, t['cx'], t['cy'], l, r, w, b)
         res = cv2.matchTemplate(roi, t['patch'], cv2.TM_CCORR_NORMED)
-        *_, loc = cv2.minMaxLoc(res)
-        dx, dy = refine(res, (loc[0], loc[1]))
-        mx = t['cx'] - t['l'] + loc[0] + dx + t['th']
-        my = t['cy'] - t['t'] + loc[1] + dy + t['th']
-        return mx, my
+        _, score, _, loc = cv2.minMaxLoc(res)
+        # Clearness: score minus the best alternative peak (search peak
+        # neighbourhood suppressed so alternative peaks are counted).
+        m = res.copy()
+        m[max(0, loc[1] - 3):loc[1] + 4, max(0, loc[0] - 3):loc[0] + 4] = 0.0
+        edge = bool(loc[0] in (0, res.shape[1] - 1) or loc[1] in (0, res.shape[0] - 1))
+        dx, dy = refine(res, loc)
+        mx = t['cx'] - l + loc[0] + dx + t['th']
+        my = t['cy'] - w + loc[1] + dy + t['th']
+        ccoeff = float(cv2.matchTemplate(roi, t['patch'], cv2.TM_CCOEFF_NORMED).max())
+        return float(mx), float(my), float(score), float(score - m.max()), edge, ccoeff
 
     def run(self, out_csv: str = '03_output/Matched.csv', q: queue.Queue | None = None) -> None:
         """Run template matching across all frames and save results to out_csv.
@@ -183,6 +263,9 @@ class TemplateMatcher:
             after each processed frame.
         """
         rec: List[List[float]] = []
+        diag: List[Dict[str, Any]] = []
+        previous_pos: Dict[int, Tuple[float, float]] = {
+            t['id']: (float(t['cx']), float(t['cy'])) for t in self.templates}
         idx = 1
         total = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)) - 1
         # Initialise progress counter; always define prog to avoid UnboundLocalError
@@ -197,8 +280,19 @@ class TemplateMatcher:
                 idx += 1
                 g = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
                 for t in self.templates:
-                    mx, my = self._match(g, t)
+                    mx, my, d = self._match(g, t)
                     rec.append([idx, t['id'], t['cx'], t['cy'], mx, my])
+                    # Inter-frame position jump of the same template: catches
+                    # gross mismatches that per-frame scores cannot see
+                    # (e.g. objects moving across the template ROI).
+                    dxp = math.hypot(mx - previous_pos[t['id']][0],
+                                     my - previous_pos[t['id']][1])
+                    d['delta_px'] = round(float(dxp), 4)
+                    d['low_conf'] = bool(d['low_conf'] or d['delta_px'] > MATCH_DELTA_MAX)
+                    previous_pos[t['id']] = (mx, my)
+                    diag.append([idx, t['id'], d['score'], d['clearness'],
+                                 d['ccoeff_peak'], d['roi_edge'], d['delta_px'],
+                                 d['re_searched'], d['expanded_adopted'], d['low_conf']])
                 bar.update(1)
                 if q:
                     prog += 1
@@ -207,11 +301,18 @@ class TemplateMatcher:
         # Total number of frames actually read (useful metadata for callers;
         # the reference frame 1 is included even though it is not matched).
         self.frame_count = idx
+        self.match_stats = diag
         # Ensure output directory exists
         out_path = Path(out_csv)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(rec, columns=['Frame_No', 'Template_No', 'x', 'y', 'mx',
                                    'my']).to_csv(out_path, index=False)
+        # Confidence diagnostics (separate file: the Matched.csv format is
+        # unchanged for existing consumers).
+        pd.DataFrame(diag, columns=['Frame_No', 'Template_No', 'score', 'clearness',
+                                    'ccoeff_peak', 'roi_edge', 'delta_px', 're_searched',
+                                    'expanded_adopted', 'low_conf']).to_csv(
+            out_path.with_name(out_path.stem + '_diagnostics.csv'), index=False)
         del self.first
         gc.collect()
 
@@ -219,6 +320,20 @@ class TemplateMatcher:
 # =============================================================================
 # Affine
 # =============================================================================
+
+# --- Estimation-quality thresholds ------------------------------------------------------------
+# Calibrated on the 305 estimated frames of the real-clip Matched.csv
+# (inlier count {3: 7, 4: 273, 5: 25}, inlier ratio min 0.600, max inlier
+# residual 1.259 px, inlier spread std min 14.6 px) and on the frame-to-frame
+# matrix deltas of the same clip (|Δt| max 4.65 px, |Δscale| max 0.006,
+# |Δrot| max 0.243 deg).  See benchmarks/README.md "信頼度評価".
+EST_INLIER_COUNT_MIN = 3    # minimum RANSAC inliers for a usable partial affine
+EST_INLIER_RATIO_MIN = 0.6  # inliers / points (real clip min = 3/5)
+EST_RESIDUAL_MAX = 2.0      # px, max residual of adopted points (= RANSAC threshold)
+EST_SPREAD_MIN = 10.0       # px, per-axis std of inlier positions (degenerate config)
+EST_DELTA_T_MAX = 12.0      # px/frame, translation change (2x observed max 4.65)
+EST_DELTA_SCALE_MAX = 0.02  # /frame relative scale change (observed max 0.006)
+EST_DELTA_ROT_MAX = 1.0     # deg/frame rotation change (observed max 0.243)
 
 
 class AffineCorrector:
@@ -251,17 +366,60 @@ class AffineCorrector:
         # Per-frame matrix cache filled by `precompute()`; `correct()` reuses it so
         # the estimation stage can be timed separately from the warp stage.
         self._mcache: Dict[int, np.ndarray] = {}
+        # (frame, matrix) of the last freshly estimated frame, for the
+        # frame-to-frame delta diagnostics (`d_t`, `d_scale`, `d_rot`).
+        self._last_est: Tuple[int, np.ndarray] | None = None
 
     def precompute(self) -> None:
-        """Estimate and cache the affine matrix for every frame of the matches CSV."""
+        """Estimate and cache the affine matrix for every frame of the matches CSV.
+
+        Also writes the estimation-quality diagnostics next to the output
+        video (``<output>_diagnostics.csv``).
+        """
         for n in sorted(self.matches.Frame_No.unique()):
             self._M(int(n))
+        self.write_diagnostics()
+
+    def write_diagnostics(self, path: str | None = None) -> None:
+        """Write the per-frame estimation quality diagnostics as a CSV file.
+
+        Columns: frame, points, inliers, inlier_ratio, residual_max,
+        spread_x, spread_y, delta_frame, d_t, d_scale, d_rot, est_ok,
+        quality_ok.  ``est_ok`` reports estimation success while
+        ``quality_ok`` reports (independently) whether the per-frame
+        quality thresholds passed.
+        """
+        cols = ['frame', 'points', 'inliers', 'inlier_ratio', 'residual_max',
+                'spread_x', 'spread_y', 'delta_frame', 'd_t', 'd_scale', 'd_rot',
+                'est_ok', 'quality_ok']
+        p = Path(path) if path is not None else self.out.with_name(
+            self.out.stem + '_diagnostics.csv')
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if self.estimate_stats:
+            df = pd.DataFrame(self.estimate_stats)
+            df['est_ok'] = df['ok']
+            df[[c for c in cols if c in df.columns]].to_csv(p, index=False)
+        else:
+            pd.DataFrame(columns=cols).to_csv(p, index=False)
 
     def _M(self, n: int) -> np.ndarray:
         """Estimate the affine matrix for frame n using matched control points.
 
         Results are cached per frame so repeated calls (e.g. after
         `precompute()`) do not repeat the RANSAC estimation.
+
+        In addition to the matrix, per-frame quality diagnostics are recorded
+        in ``estimate_stats``: RANSAC inlier count/ratio, residuals and
+        position spread of the adopted points, and the frame-to-frame matrix
+        deltas (translation / scale / rotation) used to flag abrupt changes.
+        ``est_ok`` means the estimation succeeded; ``quality_ok`` is the
+        independent quality verdict using the calibrated thresholds.
+
+        Raises
+        ------
+        RuntimeError
+            If RANSAC fails entirely (estimation failure, reported
+            separately from a quality failure).
         """
         cached = self._mcache.get(n)
         if cached is not None:
@@ -270,12 +428,46 @@ class AffineCorrector:
         src = df[['mx', 'my']].to_numpy(np.float32)
         dst = df[['x', 'y']].to_numpy(np.float32)
         M, inliers = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=2)
-        self.estimate_stats.append(
-            dict(frame=n,
-                 points=int(len(src)),
-                 inliers=int(inliers.sum()) if inliers is not None else 0,
-                 ok=M is not None,
-                 M=None if M is None else M.astype(float).tolist()))
+        mask = inliers.ravel().astype(bool) if inliers is not None else None
+        n_inl = int(mask.sum()) if mask is not None else 0
+        entry = dict(frame=n,
+                     points=int(len(src)),
+                     inliers=n_inl,
+                     ok=M is not None,
+                     M=None if M is None else M.astype(float).tolist())
+        if M is not None:
+            inp = src[mask] if mask is not None else np.empty((0, 2), np.float32)
+            pred = (M[:, :2] @ inp.T + M[:, 2:3]).T
+            entry['inlier_ratio'] = round(float(mask.mean()) if mask is not None else 0.0, 4)
+            entry['residual_max'] = round(float(np.linalg.norm(pred - dst[mask], axis=1).max())
+                                          if mask is not None and mask.any() else float('nan'), 4)
+            entry['spread_x'] = round(float(inp[:, 0].std()), 2) if inp.shape[0] else float('nan')
+            entry['spread_y'] = round(float(inp[:, 1].std()), 2) if inp.shape[0] else float('nan')
+            # frame-to-frame matrix delta vs the previous estimated frame
+            prev = self._last_est
+            if prev is not None and n - prev[0] == 1:
+                B = prev[1]
+                entry['delta_frame'] = prev[0]
+                entry['d_t'] = round(float(np.linalg.norm(M[:, 2] - B[:, 2])), 4)
+                sa = float(np.linalg.svd(B[:2, :2], compute_uv=False).mean())
+                sb = float(np.linalg.svd(M[:2, :2], compute_uv=False).mean())
+                entry['d_scale'] = round(abs(sb / sa - 1.0), 6)
+                entry['d_rot'] = round(abs(math.degrees(math.atan2(M[1, 0], M[0, 0])
+                                                        - math.atan2(B[1, 0], B[0, 0]))), 4)
+            # Independent quality verdict (est_ok and quality_ok are reported
+            # separately; quality_ok never blocks the pipeline).
+            quality = bool(
+                n_inl >= EST_INLIER_COUNT_MIN
+                and entry['inlier_ratio'] >= EST_INLIER_RATIO_MIN
+                and entry.get('residual_max', float('nan')) <= EST_RESIDUAL_MAX
+                and entry.get('spread_x', float('nan')) >= EST_SPREAD_MIN
+                and entry.get('spread_y', float('nan')) >= EST_SPREAD_MIN
+                and (entry.get('d_t', 0.0) <= EST_DELTA_T_MAX
+                     and entry.get('d_scale', 0.0) <= EST_DELTA_SCALE_MAX
+                     and entry.get('d_rot', 0.0) <= EST_DELTA_ROT_MAX))
+            entry['quality_ok'] = quality
+            self._last_est = (n, M)
+        self.estimate_stats.append(entry)
         if M is None:
             raise RuntimeError('affine fail')
         self._mcache[n] = M
@@ -736,9 +928,27 @@ def main() -> None:
     if a.nogui:
         # Batch mode: run matching and correction directly (streamed: no
         # intermediate PNG files are produced)
-        TemplateMatcher(a.video, a.csv).run('03_output/Matched.csv')
-        AffineCorrector(a.video, '03_output/Matched.csv',
-                        '03_output/Affined.mp4').correct()
+        matcher = TemplateMatcher(a.video, a.csv)
+        matcher.run('03_output/Matched.csv')
+        corrector = AffineCorrector(a.video, '03_output/Matched.csv',
+                                    '03_output/Affined.mp4')
+        corrector.precompute()
+        corrector.correct()
+        # Confidence report: estimation success and quality pass are separate
+        # verdicts (issue #8).  Low-confidence matches are flagged in the
+        # diagnostics files, they do not stop the pipeline.
+        estim = corrector.estimate_stats
+        n_est = len(estim)
+        n_fail = sum(1 for s in estim if not s.get('ok'))
+        q_fail = [s['frame'] for s in estim if s.get('quality_ok') is False]
+        low = sum(1 for d in matcher.match_stats if d[-1])
+        print(f'[report] frames: {n_est}  est success: {n_est - n_fail}  '
+              f'est failure: {n_fail}')
+        print(f'[report] quality: pass {n_est - len(q_fail)}  fail {len(q_fail)}'
+              + (f'  (frames {q_fail[:20]})' if q_fail else ''))
+        print(f'[report] low-confidence matches: {low} / {len(matcher.match_stats)} '
+              f'(details: 03_output/Matched_diagnostics.csv, '
+              f'03_output/Affined_diagnostics.csv)')
     else:
         # Interactive GUI
         TemplateGUI(a.video, a.csv)
