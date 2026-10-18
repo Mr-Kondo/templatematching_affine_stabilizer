@@ -110,6 +110,7 @@ def crop(src: np.ndarray, cx: int, cy: int, h: int) -> np.ndarray:
     return crop_lrbt(src, cx, cy, h, h, h, h)
 
 
+# clean-code exception (four-argument ceiling): positional crop API is used by legacy callers; revisit if its coordinate contract changes.
 def crop_lrbt(src: np.ndarray, cx: int, cy: int, left: int, right: int, top: int,
               bottom: int) -> np.ndarray:
     """Crop a rectangular ROI using individual pixel margins measured from the centre.
@@ -249,6 +250,7 @@ class TemplateMatcher:
                      patch=crop(self.first, t['cx'], t['cy'], t['tpl'] // 2))
                 for t in templates]
 
+    # clean-code exception (function size): candidate comparison keeps confidence rules together; split when another search mode is adopted.
     def _match(self, g: np.ndarray, t: Dict[str, Any]) -> Tuple[float, float, Dict[str, Any]]:
         """Match a single template t in the current grayscale frame g.
 
@@ -291,6 +293,7 @@ class TemplateMatcher:
                             expanded_adopted=bool(expanded),
                             low_conf=bool(trigger or ccoeff_peak < MATCH_CCOEFF_ALARM))
 
+    # clean-code exception (four-argument ceiling): explicit directional margins preserve existing callers; revisit when search geometry changes.
     def _match_window(self, g: np.ndarray, t: Dict[str, Any], l: int, r: int, w: int,
                       b: int) -> Tuple[float, float, float, float, bool, float]:
         """Match template t within one specific search window (l, r, w, b margins).
@@ -400,6 +403,51 @@ EST_DELTA_SCALE_MAX = 0.02  # /frame relative scale change (observed max 0.006)
 EST_DELTA_ROT_MAX = 1.0     # deg/frame rotation change (observed max 0.243)
 
 
+def _inlier_metrics(src, dst, matrix, mask):
+    points = src[mask] if mask is not None else np.empty((0, 2), np.float32)
+    predicted = (matrix[:, :2] @ points.T + matrix[:, 2:3]).T
+    return dict(
+        inlier_ratio=round(float(mask.mean()) if mask is not None else 0.0, 4),
+        residual_max=round(float(np.linalg.norm(predicted - dst[mask], axis=1).max())
+                           if mask is not None and mask.any() else float('nan'), 4),
+        spread_x=round(float(points[:, 0].std()), 2) if points.shape[0] else float('nan'),
+        spread_y=round(float(points[:, 1].std()), 2) if points.shape[0] else float('nan'))
+
+
+def _motion_metrics(matrix, previous):
+    old_scale = float(np.linalg.svd(previous[:2, :2], compute_uv=False).mean())
+    scale = float(np.linalg.svd(matrix[:2, :2], compute_uv=False).mean())
+    return dict(d_t=round(float(np.linalg.norm(matrix[:, 2] - previous[:, 2])), 4),
+                d_scale=round(abs(scale / old_scale - 1.0), 6),
+                d_rot=round(abs(math.degrees(math.atan2(matrix[1, 0], matrix[0, 0])
+                                            - math.atan2(previous[1, 0], previous[0, 0]))), 4))
+
+
+def _quality_ok(entry):
+    return bool(entry['inliers'] >= EST_INLIER_COUNT_MIN
+                and entry['inlier_ratio'] >= EST_INLIER_RATIO_MIN
+                and entry['residual_max'] <= EST_RESIDUAL_MAX
+                and entry['spread_x'] >= EST_SPREAD_MIN
+                and entry['spread_y'] >= EST_SPREAD_MIN
+                and entry.get('d_t', 0.0) <= EST_DELTA_T_MAX
+                and entry.get('d_scale', 0.0) <= EST_DELTA_SCALE_MAX
+                and entry.get('d_rot', 0.0) <= EST_DELTA_ROT_MAX)
+
+
+def _read_matches(path):
+    matches = pd.read_csv(path)
+    required = ['Frame_No', 'x', 'y', 'mx', 'my']
+    if not set(required).issubset(matches.columns):
+        raise ValueError('追跡CSV: Frame_No, x, y, mx, my列が必要です')
+    coordinates = matches[required].to_numpy(dtype=float)
+    if not np.isfinite(coordinates).all():
+        raise ValueError('追跡CSV: 座標・フレーム番号には有限の数値が必要です')
+    frames = coordinates[:, 0]
+    if np.any(frames < 2) or np.any(frames != np.floor(frames)):
+        raise ValueError('追跡CSV: フレーム番号には2以上の整数が必要です')
+    return matches
+
+
 class AffineCorrector:
     """Correct video frames using affine (and perspective) transformations based on matched points.
 
@@ -419,16 +467,7 @@ class AffineCorrector:
                  video: str,
                  csv: str,
                  outv: str = '03_output/Affined.mp4'):
-        self.matches = pd.read_csv(csv)
-        required = ['Frame_No', 'x', 'y', 'mx', 'my']
-        if not set(required).issubset(self.matches.columns):
-            raise ValueError('追跡CSV: Frame_No, x, y, mx, my列が必要です')
-        coordinates = self.matches[required].to_numpy(dtype=float)
-        if not np.isfinite(coordinates).all():
-            raise ValueError('追跡CSV: 座標・フレーム番号には有限の数値が必要です')
-        frames = coordinates[:, 0]
-        if np.any(frames < 2) or np.any(frames != np.floor(frames)):
-            raise ValueError('追跡CSV: フレーム番号には2以上の整数が必要です')
+        self.matches = _read_matches(csv)
         self._frames = self.matches.groupby('Frame_No', sort=False).indices
         self.video = Path(video)
         self.out = Path(outv)
@@ -497,59 +536,38 @@ class AffineCorrector:
             If RANSAC fails entirely (estimation failure, reported
             separately from a quality failure).
         """
-        cached = self._mcache.get(n)
-        if cached is not None:
-            return cached
+        if n in self._mcache:
+            return self._mcache[n]
+        matrix, entry = self._estimate(n)
+        if matrix is not None:
+            previous = self._last_est
+            if previous is not None and n - previous[0] == 1:
+                entry.update(_motion_metrics(matrix, previous[1]), delta_frame=previous[0])
+            entry['quality_ok'] = _quality_ok(entry)
+            self._last_est = (n, matrix)
+        self.estimate_stats.append(entry)
+        if matrix is None:
+            raise RuntimeError('affine fail')
+        self._mcache[n] = matrix
+        return matrix
+
+    def _estimate(self, n):
         if n not in self._frames:
             raise ValueError(f'追跡CSV: フレーム{n}の対応点がありません')
-        df = self.matches.iloc[self._frames[n]]
-        src = df[['mx', 'my']].to_numpy(np.float32)
-        dst = df[['x', 'y']].to_numpy(np.float32)
-        M, inliers = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=2)
+        frame_rows = self.matches.iloc[self._frames[n]]
+        src = frame_rows[['mx', 'my']].to_numpy(np.float32)
+        dst = frame_rows[['x', 'y']].to_numpy(np.float32)
+        matrix, inliers = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC,
+                                                     ransacReprojThreshold=2)
+        if matrix is not None and (not np.isfinite(matrix).all()
+                                   or np.linalg.det(matrix[:, :2]) <= 0):
+            matrix = None
         mask = inliers.ravel().astype(bool) if inliers is not None else None
-        n_inl = int(mask.sum()) if mask is not None else 0
-        entry = dict(frame=n,
-                     points=int(len(src)),
-                     inliers=n_inl,
-                     ok=M is not None,
-                     M=None if M is None else M.astype(float).tolist())
-        if M is not None:
-            inp = src[mask] if mask is not None else np.empty((0, 2), np.float32)
-            pred = (M[:, :2] @ inp.T + M[:, 2:3]).T
-            entry['inlier_ratio'] = round(float(mask.mean()) if mask is not None else 0.0, 4)
-            entry['residual_max'] = round(float(np.linalg.norm(pred - dst[mask], axis=1).max())
-                                          if mask is not None and mask.any() else float('nan'), 4)
-            entry['spread_x'] = round(float(inp[:, 0].std()), 2) if inp.shape[0] else float('nan')
-            entry['spread_y'] = round(float(inp[:, 1].std()), 2) if inp.shape[0] else float('nan')
-            # frame-to-frame matrix delta vs the previous estimated frame
-            prev = self._last_est
-            if prev is not None and n - prev[0] == 1:
-                B = prev[1]
-                entry['delta_frame'] = prev[0]
-                entry['d_t'] = round(float(np.linalg.norm(M[:, 2] - B[:, 2])), 4)
-                sa = float(np.linalg.svd(B[:2, :2], compute_uv=False).mean())
-                sb = float(np.linalg.svd(M[:2, :2], compute_uv=False).mean())
-                entry['d_scale'] = round(abs(sb / sa - 1.0), 6)
-                entry['d_rot'] = round(abs(math.degrees(math.atan2(M[1, 0], M[0, 0])
-                                                        - math.atan2(B[1, 0], B[0, 0]))), 4)
-            # Independent quality verdict (est_ok and quality_ok are reported
-            # separately; quality_ok never blocks the pipeline).
-            quality = bool(
-                n_inl >= EST_INLIER_COUNT_MIN
-                and entry['inlier_ratio'] >= EST_INLIER_RATIO_MIN
-                and entry.get('residual_max', float('nan')) <= EST_RESIDUAL_MAX
-                and entry.get('spread_x', float('nan')) >= EST_SPREAD_MIN
-                and entry.get('spread_y', float('nan')) >= EST_SPREAD_MIN
-                and (entry.get('d_t', 0.0) <= EST_DELTA_T_MAX
-                     and entry.get('d_scale', 0.0) <= EST_DELTA_SCALE_MAX
-                     and entry.get('d_rot', 0.0) <= EST_DELTA_ROT_MAX))
-            entry['quality_ok'] = quality
-            self._last_est = (n, M)
-        self.estimate_stats.append(entry)
-        if M is None:
-            raise RuntimeError('affine fail')
-        self._mcache[n] = M
-        return M
+        entry = dict(frame=n, points=int(len(src)), inliers=int(mask.sum()) if mask is not None else 0,
+                     ok=matrix is not None, M=None if matrix is None else matrix.astype(float).tolist())
+        if matrix is not None:
+            entry.update(_inlier_metrics(src, dst, matrix, mask))
+        return matrix, entry
 
     def correct(self, q: queue.Queue | None = None) -> None:
         """Stream the input video once, warping each frame with its estimated transform.
@@ -590,6 +608,7 @@ class AffineCorrector:
                 writer.release()
             verify_video(staged[0], done)
 
+    # clean-code exception (function size): sequential decode/warp/progress is one loop; split when adding another output sink.
     def _warp_frames(self, cap, writer, q) -> int:
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
