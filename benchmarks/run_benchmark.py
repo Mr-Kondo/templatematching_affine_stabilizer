@@ -322,10 +322,27 @@ def run_once(args: argparse.Namespace, run_dir: Path) -> Dict[str, Any]:
         'pipeline_total': pipeline_s,
         'prepare_synthetic': timings.get('prepare_s', 0.0),
     }
-    report['frames'] = {'input': n_input,
-                        'stabilised_written': max(0, n_input - 1)}
+    # Decode the output video to count the frames it actually contains and
+    # read its fps/duration: proves the output frame count matches the input
+    # (the reference frame is kept since issue #7).
+    cap_out = cv2.VideoCapture(str(run_dir / 'Affined.mp4'))
+    n_written = 0
+    while cap_out.read()[0]:
+        n_written += 1
+    out_fps = cap_out.get(cv2.CAP_PROP_FPS)
+    cap_out.release()
+    in_fps = cv2.VideoCapture(str(video_path)).get(cv2.CAP_PROP_FPS)
+    report['frames'] = {
+        'input': n_input,
+        'stabilised_written': n_written,
+        'frame_count_match': n_written == n_input,
+        'input_fps': in_fps,
+        'output_fps': out_fps,
+        'input_duration_s': n_input / in_fps if in_fps > 0 else None,
+        'output_duration_s': n_written / out_fps if out_fps > 0 else None,
+    }
     report['throughput'] = {
-        'frames_per_second': (n_input - 1) / pipeline_s if pipeline_s > 0 else None,
+        'frames_per_second': n_input / pipeline_s if pipeline_s > 0 else None,
     }
     usage = resource.getrusage(resource.RUSAGE_SELF)
     report['resources'] = {
@@ -403,7 +420,14 @@ def write_report(run_dir: Path, env: Dict[str, Any],
         lines += ["", f"throughput: **{t['frames_per_second']:.2f} frames/s**"]
     f = report.get('frames', {})
     lines += ["", f"frames: input {f.get('input')} -> stabilised "
-              f"{f.get('stabilised_written')}", "", "## Accuracy", ""]
+              f"{f.get('stabilised_written')} "
+              f"(match: {f.get('frame_count_match')})"]
+    if f.get('input_fps'):
+        lines += [f"fps: input {f['input_fps']:.3f} -> output "
+                  f"{f.get('output_fps', 0):.3f}  |  duration: "
+                  f"{f.get('input_duration_s', 0):.3f}s -> "
+                  f"{f.get('output_duration_s', 0):.3f}s"]
+    lines += ["", "## Accuracy", ""]
     acc = report.get('accuracy', {})
     for k, v in acc.items():
         if isinstance(v, list):
