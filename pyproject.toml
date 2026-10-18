@@ -1,19 +1,15 @@
 [project]
 name = "templatematching-affine-stabilizer"
-version = "0.11.0"
-description = "Add your description here"
+version = "0.12.0"
+description = "Template-based video stabilization with subpixel tracking and similarity transforms"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
-    "numpy==2.3.0",
-    "opencv-python-headless==4.11.0.86",
-    "pandas==2.3.0",
-    "pillow==11.2.1",
-    "python-dateutil==2.9.0.post0",
-    "pytz==2025.2",
-    "six==1.17.0",
-    "tqdm==4.67.1",
-    "tzdata==2025.2",
+    "numpy==2.5.4",
+    "opencv-python-headless==4.14.0.94",
+    "pandas==3.0.6",
+    "pillow==13.0.0",
+    "tqdm==4.70.1",
 ]

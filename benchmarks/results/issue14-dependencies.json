@@ -1,0 +1,158 @@
+{
+  "max_coordinate_delta_px": 0.0,
+  "mean_coordinate_delta_px": 0.0,
+  "baseline": {
+    "packages": {
+      "numpy": "2.3.0",
+      "opencv": "4.11.0",
+      "pandas": "2.3.0",
+      "pillow": "11.2.1",
+      "tqdm": "4.67.1"
+    },
+    "frames": {
+      "input": 306,
+      "stabilised_written": 306,
+      "frame_count_match": true,
+      "input_fps": 30.09835966890624,
+      "output_fps": 30.098,
+      "input_duration_s": 10.166667,
+      "output_duration_s": 10.16678849092963
+    },
+    "quality": {
+      "thresholds": {
+        "match_score_min": 0.95,
+        "match_clear_min": 0.0002,
+        "match_ccoeff_alarm": 0.78,
+        "match_delta_max_px": 8.0,
+        "est_inlier_count_min": 3,
+        "est_inlier_ratio_min": 0.6,
+        "est_residual_max_px": 2.0,
+        "est_spread_min_px": 10.0,
+        "est_delta_t_max_px": 12.0,
+        "est_delta_scale_max": 0.02,
+        "est_delta_rot_max_deg": 1.0
+      },
+      "matching": {
+        "rows": 1525,
+        "low_conf": 0,
+        "re_searched": 0,
+        "expanded_adopted": 0,
+        "roi_edge": 0
+      },
+      "estimation": {
+        "frames": 305,
+        "est_fail": 0,
+        "quality_fail": 0,
+        "quality_fail_frames": []
+      }
+    },
+    "accuracy": {
+      "tracked_point_residual_px": {
+        "n": 1525,
+        "mean": 3.349227645245411,
+        "median": 0.5349415454726744,
+        "p95": 21.24531415271514,
+        "max": 26.615724247745188,
+        "std": 6.652449467423735
+      },
+      "ransac_inlier_rate": {
+        "mean": 0.8118032786885245,
+        "min": 0.6,
+        "frames": 305
+      },
+      "outlier_point_rate": 0.18819672131147547,
+      "background_residual_px_not_tracked": {
+        "n": 56812,
+        "mean": 3.9025125631644064,
+        "median": 1.4062983276456849,
+        "p95": 18.211052634543226,
+        "max": 79.58168371902566,
+        "std": 6.2542753157534285
+      }
+    },
+    "timings_s": {
+      "match": 1.1181587089959066,
+      "estimate_matrices": 0.05652312500751577,
+      "warp_and_write_streamed": 1.716358042001957,
+      "pipeline_total": 2.8910398760053795,
+      "prepare_synthetic": 0.0
+    }
+  },
+  "updated": {
+    "packages": {
+      "numpy": "2.5.4",
+      "opencv": "4.14.0",
+      "pandas": "3.0.6",
+      "pillow": "13.0.0",
+      "tqdm": "4.70.1"
+    },
+    "frames": {
+      "input": 306,
+      "stabilised_written": 306,
+      "frame_count_match": true,
+      "input_fps": 30.09835966890624,
+      "output_fps": 30.098,
+      "input_duration_s": 10.166667,
+      "output_duration_s": 10.16678849092963
+    },
+    "quality": {
+      "thresholds": {
+        "match_score_min": 0.95,
+        "match_clear_min": 0.0002,
+        "match_ccoeff_alarm": 0.78,
+        "match_delta_max_px": 8.0,
+        "est_inlier_count_min": 3,
+        "est_inlier_ratio_min": 0.6,
+        "est_residual_max_px": 2.0,
+        "est_spread_min_px": 10.0,
+        "est_delta_t_max_px": 12.0,
+        "est_delta_scale_max": 0.02,
+        "est_delta_rot_max_deg": 1.0
+      },
+      "matching": {
+        "rows": 1525,
+        "low_conf": 0,
+        "re_searched": 0,
+        "expanded_adopted": 0,
+        "roi_edge": 0
+      },
+      "estimation": {
+        "frames": 305,
+        "est_fail": 0,
+        "quality_fail": 0,
+        "quality_fail_frames": []
+      }
+    },
+    "accuracy": {
+      "tracked_point_residual_px": {
+        "n": 1525,
+        "mean": 3.349227645245411,
+        "median": 0.5349415454726744,
+        "p95": 21.24531415271515,
+        "max": 26.615724247745188,
+        "std": 6.652449467423734
+      },
+      "ransac_inlier_rate": {
+        "mean": 0.8118032786885245,
+        "min": 0.6,
+        "frames": 305
+      },
+      "outlier_point_rate": 0.18819672131147547,
+      "background_residual_px_not_tracked": {
+        "n": 56813,
+        "mean": 3.902861616941685,
+        "median": 1.4063360295209062,
+        "p95": 18.2143500132664,
+        "max": 79.58168371902566,
+        "std": 6.254773732940149
+      }
+    },
+    "timings_s": {
+      "match": 1.086503124999581,
+      "estimate_matrices": 0.06795962501200847,
+      "warp_and_write_streamed": 1.5071823339967523,
+      "pipeline_total": 2.6616450840083417,
+      "prepare_synthetic": 0.0
+    }
+  }
+}
