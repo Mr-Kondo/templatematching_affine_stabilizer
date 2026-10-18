@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Tuple
 
 import cv2
 
-from stabilizer_core import (load_templates, run_pipeline, validate_template, validate_templates)
+from stabilizer_core import (TEMPLATE_FIELDS, load_templates, run_pipeline, validate_template, validate_templates)
 
 def _pil_to_tk_photo(pil_img, tk_module):
     """Convert PIL Image to Tkinter PhotoImage without using ImageTk.
@@ -28,6 +28,7 @@ def _pil_to_tk_photo(pil_img, tk_module):
 class TemplateGUI:
     """Interactive GUI for selecting templates and running the stabilisation pipeline."""
 
+    # clean-code exception: session lifetime must release capture after Tk exits; revisit when adding cancellation.
     def __init__(self, video: str, csv_p: str = '01_input/Input.csv'):
         import tkinter as tk
         from tkinter import messagebox, simpledialog, ttk
@@ -58,17 +59,15 @@ class TemplateGUI:
         finally:
             self.cap.release()
 
-    # -------- widgets --------
+    # clean-code exception: explicit Tk layout keeps binding order visible; split when a new panel is added.
     def _build_widgets(self) -> None:
         ttk = self.ttk
         ctl = ttk.Frame(self.root)
         ctl.pack(fill='x')
         ttk.Label(ctl, text='Template').pack(side='left')
-        # Free‑form numeric entries for template size
         self.ent_tpl = ttk.Entry(ctl, width=6)
         self.ent_tpl.insert(0, '64')
         self.ent_tpl.pack(side='left')
-        # Entries for ROI margins
         ttk.Label(ctl, text='SearchLeft').pack(side='left')
         self.ent_left = ttk.Entry(ctl, width=6)
         self.ent_left.insert(0, '128')
@@ -85,7 +84,6 @@ class TemplateGUI:
         self.ent_bottom = ttk.Entry(ctl, width=6)
         self.ent_bottom.insert(0, '128')
         self.ent_bottom.pack(side='left')
-        # Control buttons
         self.btn_delete = ttk.Button(ctl, text='Delete', command=self._del)
         self.btn_delete.pack(side='right')
         self.btn_undo = ttk.Button(ctl, text='Undo', command=self._undo)
@@ -96,7 +94,6 @@ class TemplateGUI:
         self.btn_zoom_in.pack(side='right')
         self.btn_zoom_out = ttk.Button(ctl, text='-', command=self._zoom_out)
         self.btn_zoom_out.pack(side='right')
-        # Table for templates (with ID column)
         self.tree = ttk.Treeview(
             self.root,
             columns=('no', 'cx', 'cy', 'tpl', 'l', 'r', 't', 'b'),
@@ -116,10 +113,8 @@ class TemplateGUI:
             self.tree.heading(col, text=text)
         self.tree.bind('<Double-1>', self._edit)
         self.tree.pack(fill='x')
-        # Progress bar
         self.pb = ttk.Progressbar(self.root, orient='horizontal', length=300, mode='determinate')
         self.pb.pack(fill='x', padx=4, pady=4)
-        # Frame slider and canvas
         self.scale = ttk.Scale(self.root,
                                from_=1,
                                to=self.total,
@@ -128,15 +123,12 @@ class TemplateGUI:
         self.scale.pack(fill='x')
         self.canvas = self.tk.Canvas(self.root)
         self.canvas.pack()
-        # Status label showing mouse coordinates
         self.status = self.ttk.Label(self.root, text='x: -, y: -')
         self.status.pack(fill='x', pady=2)
-        # Bindings
         self.canvas.bind('<Button-1>', self._click)
         self.canvas.bind('<Motion>', self._on_motion)
         self._photo = None
 
-    # -------- data io --------
     def _load_csv(self) -> None:
         """Load existing templates from the CSV if it exists."""
         if not self.csv.exists():
@@ -152,6 +144,7 @@ class TemplateGUI:
             self._add_tpl(t['cx'], t['cy'], t['tpl'], t['l'], t['r'], t['t'], t['b'],
                           existing=True, id=t['id'])
 
+    # clean-code exception: legacy GUI argument order is retained; replace with a row object if fields change.
     def _add_tpl(
         self,
         cx: int,
@@ -175,21 +168,16 @@ class TemplateGUI:
                          iid=d['id'],
                          values=(d['id'], cx, cy, tpl, left, right, top, bottom))
 
-    # -------- UI actions --------
+    # clean-code exception: one render transaction owns the image reference; split when another view is introduced.
     def _show(self, idx: int) -> None:
         from PIL import Image
 
-        # Fallback to older API name if necessary
-        try:
-            ResamplingFilter = Image.Resampling.LANCZOS  # type: ignore[attr-defined]
-        except AttributeError:
-            ResamplingFilter = Image.LANCZOS  # type: ignore[attr-defined]
+        ResamplingFilter = Image.Resampling.LANCZOS
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, idx - 1)
         ok, frame = self.cap.read()
         if not ok:
             return
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        # Draw templates and ROIs
         for t in self.tpls:
             cx, cy = t['cx'], t['cy']
             ht = t['tpl'] // 2
@@ -254,6 +242,7 @@ class TemplateGUI:
                                  t['b']))
         self._show(int(self.scale.get()))
 
+    # clean-code exception: one edit transaction keeps cancellation atomic; split when the editor becomes non-modal.
     def _edit(self, evt) -> None:
         iid = self.tree.focus()
         if not iid:
@@ -293,21 +282,13 @@ class TemplateGUI:
         self.zoom /= 1.2
         self._show(int(float(self.scale.get())))
 
-    # -------- execute --------
     def _exec(self) -> None:
         try:
             self.tpls = validate_templates(self.tpls, self.frame_shape)
         except ValueError as error:
             self.messagebox.showerror('入力エラー', str(error))
             return
-        # Write current templates to CSV (ensure folder exists)
-        self.csv.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.csv, 'w', newline='', encoding='utf-8') as f:
-            w = csv.writer(f)
-            w.writerow(['No.', 'x座標', 'y座標', 'テンプレートの大きさ（正方形）', '探索左', '探索右', '探索上', '探索下'])
-            for t in self.tpls:
-                w.writerow([t['id'], t['cx'], t['cy'], t['tpl'], t['l'], t['r'], t['t'], t['b']])
-        # Disable buttons during processing
+        self._save_templates()
         self.btn_delete.config(state='disabled')
         self.btn_undo.config(state='disabled')
         self.btn_execute.config(state='disabled')
@@ -315,15 +296,24 @@ class TemplateGUI:
 
         self.outdir = Path('03_output') / datetime.now().strftime('run_%Y%m%d_%H%M%S_%f')
 
-        def task() -> None:
-            try:
-                run_pipeline(self.video, str(self.csv), self.outdir, q)
-                q.put(('done', None))
-            except Exception as e:
-                q.put(('err', e))
-
-        threading.Thread(target=task, daemon=True).start()
+        threading.Thread(target=self._run_task, args=(q,), daemon=True).start()
         self._poll(q)
+
+    def _save_templates(self):
+        self.csv.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.csv, 'w', newline='', encoding='utf-8') as stream:
+            writer = csv.writer(stream)
+            writer.writerow(TEMPLATE_FIELDS)
+            for template in self.tpls:
+                writer.writerow([template[key] for key in TEMPLATE_FIELDS.values()])
+
+    def _run_task(self, q):
+        try:
+            run_pipeline(self.video, str(self.csv), self.outdir, q)
+            q.put(('done', None))
+        except Exception as error:
+            # Transport every worker failure to Tk's main thread; none is treated as success.
+            q.put(('err', error))
 
     def _poll(self, q: queue.Queue[Tuple[str, Any]]) -> None:
         for _ in range(1000):
