@@ -79,7 +79,7 @@ class OutputTests(unittest.TestCase):
         for opened in [False, True]:
             writer = Mock()
             writer.isOpened.return_value = opened
-            with patch.object(atm.cv2, 'VideoWriter', return_value=writer), \
+            with patch.object(cv2, 'VideoWriter', return_value=writer), \
                  patch.object(corrector, '_warp_frames', side_effect=RuntimeError('warp')):
                 with self.assertRaises(RuntimeError):
                     corrector.correct()

@@ -23,7 +23,7 @@ templatematching_affine_stabilizer/
 │   ├── input.mp4                # 入力動画（MP4）
 │   └── Input.csv                # テンプレート定義CSV
 ├── 02_code/                     # ソースコード
-│   └── affine_template_matching.py  # メインスクリプト（676行）
+│   └── affine_template_matching.py  # 互換エントリ
 ├── 03_output/                   # 出力ファイル
 │   ├── Affined.mp4              # ブレ補正済み動画
 │   └── Matched.csv              # マッチング結果
@@ -225,7 +225,14 @@ GUIは `03_output/run_日時/`、CLIは `--outdir` のフォルダへ出力し�
 
 ## ソースコード構成
 
-**`02_code/affine_template_matching.py`** (約676行)
+**`02_code/`**
+
+- `stabilizer_core.py`: 入力検証、追跡・補正、安全な出力公開。
+- `stabilizer_gui.py`: Tk編集画面と進捗表示。
+- `stabilizer_cli.py`: 引数解釈と処理結果の表示。
+- `affine_template_matching.py`: 従来コマンド・import用の互換入口。
+
+GUI・CLIはともに `run_pipeline` を使用します。`app.py` からも同じCLI入口を呼びます。
 
 | クラス/関数 | 説明 |
 |-----------|------|
